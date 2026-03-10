@@ -107,13 +107,12 @@ function ApplyBlock({ job, canSeeViews }: { job: any; canSeeViews: boolean }) {
             </a>
           </div>
 
-          <div className="mt-3 pt-3 border-t border-dashed border-[#E5E7EB] flex items-center justify-center gap-3">
+          <div className="mt-3 pt-3 border-t border-dashed border-[#E5E7EB] flex flex-col items-center gap-1">
             <p className="text-[11px] text-[#CBD5E1] flex items-center gap-1">
               <Clock size={11}/>Опубликовано {timeAgo(job.created_at)}
             </p>
             {canSeeViews && (
               <>
-                <span className="text-[#E5E7EB]">·</span>
                 <p className="text-[11px] text-[#94A3B8] flex items-center gap-1">
                   <Eye size={11}/>{job.views ?? 0} {pluralViews(job.views ?? 0)}
                 </p>
