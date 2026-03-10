@@ -265,58 +265,42 @@ export default function AdminDashboard() {
       {/* ── SETTINGS ── */}
       {tab==='settings' && (
         <div className="max-w-2xl space-y-4">
-          {/* Telegram */}
-          <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 shadow-sm">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="font-semibold text-[#0F172A] mb-0.5">Telegram-автопостинг</h3>
-                <p className="text-sm text-[#64748B]">Автоматически отправлять новые вакансии в Telegram-канал</p>
-                <p className={cn('text-xs mt-1 font-medium', settings.telegram_autopost_enabled?'text-green-600':'text-[#94A3B8]')}>
-                  {settings.telegram_autopost_enabled?'✅ Включён':'⛔ Отключён'}
-                </p>
-              </div>
-              <button onClick={toggleTelegram} className="flex items-center gap-2">
-                {settings.telegram_autopost_enabled
-                  ? <ToggleRight size={40} className="text-[#7C3AED] cursor-pointer hover:opacity-80 transition-opacity"/>
-                  : <ToggleLeft size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>
-                }
-              </button>
-            </div>
-          </div>
 
-          {/* Header toggle */}
+          {/* Hero-блок */}
           <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 shadow-sm">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="font-semibold text-[#0F172A] mb-0.5 flex items-center gap-2"><Layout size={15}/>Навигационная шапка</h3>
-                <p className="text-sm text-[#64748B]">Показывать/скрывать шапку сайта</p>
-                <p className={cn('text-xs mt-1 font-medium', settings.header_enabled?'text-green-600':'text-[#94A3B8]')}>
-                  {settings.header_enabled?'✅ Видима':'⛔ Скрыта'}
+                <h3 className="font-semibold text-[#0F172A] mb-0.5 flex items-center gap-2">
+                  <Layout size={15}/>Hero-блок на главной
+                </h3>
+                <p className="text-sm text-[#64748B]">Показывать/скрывать приветственный блок с заголовком и статистикой</p>
+                <p className={cn('text-xs mt-1 font-medium', settings.header_enabled ? 'text-green-600' : 'text-[#94A3B8]')}>
+                  {settings.header_enabled ? '✅ Виден' : '⛔ Скрыт'}
                 </p>
               </div>
-              <button onClick={toggleHeader} className="flex items-center gap-2">
+              <button onClick={toggleHeader}>
                 {settings.header_enabled
                   ? <ToggleRight size={40} className="text-[#7C3AED] cursor-pointer hover:opacity-80 transition-opacity"/>
-                  : <ToggleLeft size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>
+                  : <ToggleLeft  size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>
                 }
               </button>
             </div>
           </div>
 
-          {/* Автомодерация вакансий */}
+          {/* Автомодерация сайта */}
           <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 shadow-sm">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="font-semibold text-[#0F172A] mb-0.5 flex items-center gap-2">🛡 Автомодерация сайта</h3>
+                <h3 className="font-semibold text-[#0F172A] mb-0.5">🛡 Автомодерация сайта</h3>
                 <p className="text-sm text-[#64748B]">Публиковать вакансии сразу без ручного одобрения</p>
-                <p className={cn('text-xs mt-1 font-medium', settings.auto_approve_jobs?'text-green-600':'text-[#94A3B8]')}>
-                  {settings.auto_approve_jobs?'✅ Включена — вакансии публикуются сразу':'⛔ Выключена — вакансии ждут модерации'}
+                <p className={cn('text-xs mt-1 font-medium', settings.auto_approve_jobs ? 'text-green-600' : 'text-[#94A3B8]')}>
+                  {settings.auto_approve_jobs ? '✅ Вкл — вакансии публикуются сразу' : '⛔ Выкл — вакансии ждут модерации'}
                 </p>
               </div>
-              <button onClick={toggleAutoApproveJobs} className="flex items-center gap-2">
+              <button onClick={toggleAutoApproveJobs}>
                 {settings.auto_approve_jobs
                   ? <ToggleRight size={40} className="text-[#7C3AED] cursor-pointer hover:opacity-80 transition-opacity"/>
-                  : <ToggleLeft size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>
+                  : <ToggleLeft  size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>
                 }
               </button>
             </div>
@@ -326,30 +310,31 @@ export default function AdminDashboard() {
           <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 shadow-sm">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="font-semibold text-[#0F172A] mb-0.5 flex items-center gap-2">✈️ Автопостинг в Telegram</h3>
-                <p className="text-sm text-[#64748B]">Отправлять новые вакансии в канал автоматически</p>
-                <p className={cn('text-xs mt-1 font-medium', settings.auto_approve_telegram?'text-green-600':'text-[#94A3B8]')}>
-                  {settings.auto_approve_telegram?'✅ Включён — новые вакансии летят в TG':'⛔ Выключен — только ручная отправка'}
+                <h3 className="font-semibold text-[#0F172A] mb-0.5">✈️ Автопостинг в Telegram</h3>
+                <p className="text-sm text-[#64748B]">Отправлять новые вакансии в канал при публикации</p>
+                <p className={cn('text-xs mt-1 font-medium', settings.auto_approve_telegram ? 'text-green-600' : 'text-[#94A3B8]')}>
+                  {settings.auto_approve_telegram ? '✅ Вкл — новые вакансии летят в TG' : '⛔ Выкл — только ручная отправка'}
                 </p>
               </div>
-              <button onClick={toggleAutoApproveTelegram} className="flex items-center gap-2">
+              <button onClick={toggleAutoApproveTelegram}>
                 {settings.auto_approve_telegram
                   ? <ToggleRight size={40} className="text-[#7C3AED] cursor-pointer hover:opacity-80 transition-opacity"/>
-                  : <ToggleLeft size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>
+                  : <ToggleLeft  size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>
                 }
               </button>
             </div>
           </div>
 
-          {/* Info */}
+          {/* Env инфо */}
           <div className="bg-[#EDE9FE] rounded-[16px] p-5 text-sm text-[#7C3AED]">
-            <p className="font-semibold mb-2">Telegram настройки</p>
+            <p className="font-semibold mb-2">Telegram настройки (.env.local / Vercel)</p>
             <div className="space-y-1 text-[#6D28D9] text-xs font-mono bg-[#DDD6FE]/50 rounded-[8px] p-3">
               <p>TELEGRAM_BOT_TOKEN=...</p>
               <p>TELEGRAM_CHANNEL_ID=@канал</p>
+              <p>NEXT_PUBLIC_APP_URL=https://домен.ru</p>
             </div>
-            <p className="text-xs mt-2 text-[#6D28D9]">Настраиваются в файле .env.local</p>
           </div>
+
         </div>
       )}
     </div>
