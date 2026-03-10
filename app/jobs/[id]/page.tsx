@@ -41,6 +41,15 @@ function ApplyBlock({ job, canSeeViews }: { job: any; canSeeViews: boolean }) {
   const isTg        = job.contact?.startsWith('@')
   const contactHref = isTg ? `https://t.me/${job.contact.slice(1)}` : job.contact ? `mailto:${job.contact}` : null
 
+  const handleTgClick = () => {
+    // fire-and-forget — не блокируем переход
+    fetch('/api/jobs/tg-click', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId: job.id }),
+    }).catch(() => {})
+  }
+
   return (
     <>
       <style>{`
@@ -94,7 +103,12 @@ function ApplyBlock({ job, canSeeViews }: { job: any; canSeeViews: boolean }) {
               </div>
             )}
 
-            <a href="https://t.me/joba_box" target="_blank" rel="noopener noreferrer"
+            {/* Кнопка TG — с трекингом клика */}
+            <a
+              href="https://t.me/joba_box"
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={handleTgClick}
               className="group flex items-center justify-between w-full px-5 py-3.5 rounded-2xl bg-[#EFF6FF] border border-[#BFDBFE] text-[#2563EB] font-semibold text-sm hover:bg-[#DBEAFE] hover:border-[#93C5FD] hover:-translate-y-0.5 transition-all duration-200">
               <span className="flex items-center gap-2.5">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="shrink-0">
@@ -107,21 +121,21 @@ function ApplyBlock({ job, canSeeViews }: { job: any; canSeeViews: boolean }) {
             </a>
           </div>
 
+          {/* Дата и просмотры — каждый на своей строке */}
           <div className="mt-3 pt-3 border-t border-dashed border-[#E5E7EB] flex flex-col items-center gap-1">
             <p className="text-[11px] text-[#CBD5E1] flex items-center gap-1">
               <Clock size={11}/>Опубликовано {timeAgo(job.created_at)}
             </p>
             {canSeeViews && (
-              <>
-                <p className="text-[11px] text-[#94A3B8] flex items-center gap-1">
-                  <Eye size={11}/>{job.views ?? 0} {pluralViews(job.views ?? 0)}
-                </p>
-              </>
+              <p className="text-[11px] text-[#94A3B8] flex items-center gap-1">
+                <Eye size={11}/>{job.views ?? 0} {pluralViews(job.views ?? 0)}
+              </p>
             )}
           </div>
         </div>
       </div>
 
+      {/* Детали */}
       <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-5 shadow-[0_4px_20px_rgba(0,0,0,0.06)] hover:shadow-[0_8px_30px_rgba(0,0,0,0.09)] transition-shadow duration-300">
         <p className="text-[10px] font-bold text-[#94A3B8] uppercase tracking-widest mb-4">О вакансии</p>
         <div className="space-y-3">
@@ -172,18 +186,17 @@ export default function JobDetailPage() {
   useEffect(() => {
     if (!id) return
 
-    // Загружаем вакансию
     supabase.from('jobs').select('*').eq('id', id).single()
       .then(({ data }) => { setJob(data); setLoading(false) })
 
-    // Инкремент просмотра — fire and forget
+    // Инкремент просмотра
     fetch('/api/jobs/view', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jobId: id }),
     }).catch(() => {})
 
-    // Проверяем роль
+    // Роль
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (!session) return
       supabase.from('users').select('role').eq('id', session.user.id).maybeSingle()
