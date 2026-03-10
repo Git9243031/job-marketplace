@@ -1,137 +1,165 @@
 #!/bin/bash
-# cd job-marketplace && bash ../fix-telegram-link.sh
+# cd job-marketplace && bash ../fix-contract-type.sh
 set -e
 
 # ─────────────────────────────────────────────────────────────────
-# 1. API route — формирует ссылку на СЕРВЕРЕ где env доступен
+# Патчим jobsService.createJob — конвертируем пустые строки в null
+# для всех nullable полей с check constraint
 # ─────────────────────────────────────────────────────────────────
-cat > app/api/telegram/route.ts << 'EOF'
-import { NextRequest, NextResponse } from 'next/server'
+python3 << 'PYEOF'
+import re
 
-export async function POST(req: NextRequest) {
-  const token   = process.env.TELEGRAM_BOT_TOKEN
-  const channel = process.env.TELEGRAM_CHANNEL_ID
+with open('services/jobs.ts', 'r') as f:
+    code = f.read()
 
-  if (!token || !channel) {
-    return NextResponse.json({ error: 'Telegram не настроен' }, { status: 400 })
+# Ищем createJob метод и добавляем sanitize перед insert
+old = 'async createJob(job: Partial<Job>)'
+new = 'async createJob(job: Partial<Job> & Record<string, any>)'
+
+# Ищем тело createJob и добавляем sanitize
+old_body = '''async createJob(job: Partial<Job>'''
+# Попробуем найти паттерн с supabase.from insert
+if 'sanitizeJob' not in code:
+    # Добавляем хелпер в начало файла после импортов
+    import_end = code.rfind("import ")
+    # Найдём конец последнего импорта
+    lines = code.split('\n')
+    last_import_line = 0
+    for i, line in enumerate(lines):
+        if line.startswith('import '):
+            last_import_line = i
+    
+    sanitize_fn = '''
+// Конвертирует пустые строки в null для полей с CHECK constraint
+function sanitizeJob(job: Record<string, any>): Record<string, any> {
+  const nullableFields = ['contract_type', 'sphere', 'format', 'job_type', 'experience_level', 'location', 'contact']
+  const result = { ...job }
+  for (const field of nullableFields) {
+    if (result[field] === '' || result[field] === undefined) {
+      result[field] = null
+    }
   }
-
-  const body = await req.json()
-  const { job } = body   // принимаем объект вакансии, а не готовый текст
-
-  if (!job) {
-    return NextResponse.json({ error: 'Нет данных вакансии' }, { status: 400 })
-  }
-
-  // Домен берём на СЕРВЕРЕ из env — здесь он всегда доступен
-  const appUrl  = (process.env.NEXT_PUBLIC_APP_URL || '').replace(/\/$/, '')
-  const jobLink = `${appUrl}/jobs/${job.id}`
-
-  const FORMAT_RU:   Record<string,string> = { remote:'удалёнка', office:'офис', hybrid:'гибрид' }
-  const TYPE_RU:     Record<string,string> = { 'full-time':'полная', 'part-time':'частичная', contract:'контракт', freelance:'фриланс', internship:'стажировка' }
-  const CONTRACT_RU: Record<string,string> = { trud:'Трудовой', gph:'ГПХ', ip:'ИП', selfemployed:'Самозанятый' }
-
-  let text = ''
-
-  // Теги
-  if (job.tags?.length) {
-    text += job.tags.map((t: string) => t.startsWith('#') ? t : `#${t}`).join(' ') + '\n\n'
-  }
-
-  // Заголовок
-  text += `<b>${job.title}</b>\n`
-  text += `🏢 ${job.company}\n`
-
-  // Мета
-  const meta: string[] = []
-  if (job.format)        meta.push(FORMAT_RU[job.format]        || job.format)
-  if (job.job_type)      meta.push(TYPE_RU[job.job_type]        || job.job_type)
-  if (job.contract_type) meta.push(CONTRACT_RU[job.contract_type] || job.contract_type)
-  if (meta.length) text += `📋 ${meta.join(' · ')}\n`
-  if (job.location) text += `📍 ${job.location}\n`
-
-  // Зарплата
-  if (job.salary_min || job.salary_max) {
-    const parts: string[] = []
-    if (job.salary_min) parts.push(`от ${Number(job.salary_min).toLocaleString('ru-RU')} ₽`)
-    if (job.salary_max) parts.push(`до ${Number(job.salary_max).toLocaleString('ru-RU')} ₽`)
-    text += `\n💰 ${parts.join(' — ')}\n`
-  }
-
-  // Описание
-  if (job.description) {
-    const short = String(job.description).slice(0, 700)
-    text += `\n${short}${job.description.length > 700 ? '...' : ''}\n`
-  }
-
-  // Стек
-  if (job.skills?.length) {
-    text += `\n🔧 <b>Стек:</b> ${job.skills.join(', ')}\n`
-  }
-
-  // Ссылка — формируется здесь на сервере с реальным доменом
-  text += `\n🔗 <a href="${jobLink}">Посмотреть вакансию и откликнуться</a>`
-
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: channel, text, parse_mode: 'HTML' }),
-  })
-
-  const data = await res.json()
-  if (!data.ok) {
-    console.error('Telegram API error:', data)
-    return NextResponse.json({ error: data.description }, { status: 500 })
-  }
-
-  return NextResponse.json({ ok: true, link: jobLink })
+  if (result.salary_min === '' || result.salary_min === 0) result.salary_min = null
+  if (result.salary_max === '' || result.salary_max === 0) result.salary_max = null
+  return result
 }
-EOF
+'''
+    lines.insert(last_import_line + 1, sanitize_fn)
+    code = '\n'.join(lines)
 
-echo "✅ app/api/telegram/route.ts"
+# Теперь патчим createJob чтобы вызывал sanitizeJob
+# Ищем .from('jobs').insert( и добавляем sanitize
+code = re.sub(
+    r'(\.from\([\'"]jobs[\'"]\)\.insert\()(\s*\{[^}]*\}|\s*job|\s*\{\.\.\.job)',
+    lambda m: m.group(1) + 'sanitizeJob(' + m.group(2).strip() + ')',
+    code,
+    count=1
+)
+
+with open('services/jobs.ts', 'w') as f:
+    f.write(code)
+
+print("✅ services/jobs.ts — sanitizeJob добавлен")
+PYEOF
+
+# Если python-патч не сработал (разная структура файла) — делаем прямую замену
+echo ""
+echo "Проверяем services/jobs.ts..."
+if grep -q "sanitizeJob" services/jobs.ts; then
+  echo "✅ sanitizeJob уже в файле"
+else
+  echo "⚠️  Python-патч не сработал, применяем ручной фикс..."
+  
+  # Показываем createJob для ручного патча
+  echo ""
+  echo "Найди в services/jobs.ts строку с .from('jobs').insert( и оберни аргумент в sanitizeJob()"
+  echo "Например:"
+  echo "  было:   .from('jobs').insert(job)"
+  echo "  стало:  .from('jobs').insert(sanitizeJob(job as any))"
+fi
 
 # ─────────────────────────────────────────────────────────────────
-# 2. telegram service — передаём объект вакансии, не текст
+# Гарантированный фикс — патчим create-job форму напрямую
+# Пустые строки → undefined перед отправкой
 # ─────────────────────────────────────────────────────────────────
-cat > services/telegram.ts << 'EOF'
-export async function postJobToTelegram(job: {
-  id: string
-  title: string
-  company: string
-  location?: string
-  format?: string
-  job_type?: string
-  contract_type?: string
-  salary_min?: number | null
-  salary_max?: number | null
-  description?: string
-  skills?: string[]
-  tags?: string[]
-}): Promise<void> {
-  const res = await fetch('/api/telegram', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    // Передаём весь объект — ссылка строится на сервере
-    body: JSON.stringify({ job }),
-  })
+python3 << 'PYEOF'
+with open('app/dashboard/hr/create-job/page.tsx', 'r') as f:
+    code = f.read()
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}))
-    console.error('Telegram post error:', err)
-    throw new Error(err.error || 'Ошибка отправки в Telegram')
-  }
+# Находим onSubmit и добавляем sanitize данных формы
+old_submit = '''  const onSubmit = async (data: JobFormData) => {
+    setServerError('')
+    if (!user || !jobId) return
 
-  const data = await res.json()
-  console.log('Telegram post sent, link:', data.link)
-}
-EOF
+    // visible = true только если включена автомодерация на сайте
+    const visible = autoApproveJobs
 
-echo "✅ services/telegram.ts"
+    const { error } = await jobsService.createJob({
+      ...data,
+      id: jobId,
+      created_by: user.id,
+      visible,
+    })'''
+
+new_submit = '''  const onSubmit = async (data: JobFormData) => {
+    setServerError('')
+    if (!user || !jobId) return
+
+    // visible = true только если включена автомодерация на сайте
+    const visible = autoApproveJobs
+
+    // Конвертируем пустые строки в undefined — иначе БД нарушает CHECK constraint
+    const clean: Record<string, any> = { ...data }
+    const nullableFields = ['contract_type', 'sphere', 'format', 'job_type', 'experience_level', 'location', 'contact']
+    for (const f of nullableFields) {
+      if (clean[f] === '') clean[f] = undefined
+    }
+    if (!clean.salary_min)  clean.salary_min  = undefined
+    if (!clean.salary_max)  clean.salary_max  = undefined
+
+    const { error } = await jobsService.createJob({
+      ...clean,
+      id: jobId,
+      created_by: user.id,
+      visible,
+    })'''
+
+if old_submit in code:
+    code = code.replace(old_submit, new_submit)
+    with open('app/dashboard/hr/create-job/page.tsx', 'w') as f:
+        f.write(code)
+    print("✅ create-job/page.tsx — пустые строки конвертируются в undefined")
+else:
+    print("⚠️  Паттерн не найден точно, применяем regex...")
+    import re
+    # Более гибкий патч
+    code = re.sub(
+        r'(const \{ error \} = await jobsService\.createJob\(\{)\s*(\.\.\.(data|clean),)',
+        r'    // Очищаем пустые строки\n    const _clean: Record<string,any> = {...data}\n    [\'contract_type\',\'sphere\',\'format\',\'job_type\',\'experience_level\',\'location\',\'contact\'].forEach(k => { if(_clean[k]===\'\') _clean[k]=undefined })\n    if(!_clean.salary_min) _clean.salary_min=undefined\n    if(!_clean.salary_max) _clean.salary_max=undefined\n\n    \1\n      ..._clean,',
+        code
+    )
+    with open('app/dashboard/hr/create-job/page.tsx', 'w') as f:
+        f.write(code)
+    print("✅ create-job/page.tsx — regex патч применён")
+PYEOF
+
+# ─────────────────────────────────────────────────────────────────
+# SQL фикс — делаем constraint более гибким (принимает NULL)
+# Это уже должно работать по умолчанию, но на всякий случай
+# ─────────────────────────────────────────────────────────────────
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Если ошибка остаётся — выполни в Supabase SQL Editor:"
+echo ""
+echo "ALTER TABLE public.jobs DROP CONSTRAINT IF EXISTS jobs_contract_type_check;"
+echo "ALTER TABLE public.jobs ADD CONSTRAINT jobs_contract_type_check"
+echo "  CHECK (contract_type IS NULL OR contract_type IN ('trud','gph','ip','selfemployed'));"
+echo ""
+echo "ALTER TABLE public.jobs DROP CONSTRAINT IF EXISTS jobs_sphere_check;"
+echo "ALTER TABLE public.jobs ADD CONSTRAINT jobs_sphere_check"
+echo "  CHECK (sphere IS NULL OR sphere IN ('it','design','marketing','finance','hr','sales','legal','other'));"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 rm -rf .next
 echo ""
 echo "✅ Готово. npm run dev"
-echo ""
-echo "Убедись что в .env.local (и в Vercel → Environment Variables) прописан:"
-echo "NEXT_PUBLIC_APP_URL=https://твой-домен.vercel.app"
-

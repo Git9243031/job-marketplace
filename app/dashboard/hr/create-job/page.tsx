@@ -74,8 +74,17 @@ export default function CreateJobPage() {
     // visible = true только если включена автомодерация на сайте
     const visible = autoApproveJobs
 
+    // Конвертируем пустые строки в undefined — иначе БД нарушает CHECK constraint
+    const clean: Record<string, any> = { ...data }
+    const nullableFields = ['contract_type', 'sphere', 'format', 'job_type', 'experience_level', 'location', 'contact']
+    for (const f of nullableFields) {
+      if (clean[f] === '') clean[f] = undefined
+    }
+    if (!clean.salary_min)  clean.salary_min  = undefined
+    if (!clean.salary_max)  clean.salary_max  = undefined
+
     const { error } = await jobsService.createJob({
-      ...data,
+      ...clean,
       id: jobId,
       created_by: user.id,
       visible,
