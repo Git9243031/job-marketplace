@@ -1,300 +1,324 @@
 #!/bin/bash
-# cd job-marketplace && bash ../fix-status-admin-only.sh
+# cd job-marketplace && bash ../fix-job-views.sh
 set -e
 
-cat > app/status/page.tsx << 'ENDOFFILE'
+echo "👁 Добавляем счётчик просмотров..."
+
+# ─────────────────────────────────────────────────────────────────
+# 1. API route — инкремент просмотра (server-side, service_role)
+# ─────────────────────────────────────────────────────────────────
+mkdir -p app/api/jobs/view
+
+cat > app/api/jobs/view/route.ts << 'ENDOFFILE'
+import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+)
+
+export async function POST(req: NextRequest) {
+  try {
+    const { jobId } = await req.json()
+    if (!jobId) return NextResponse.json({ error: 'jobId required' }, { status: 400 })
+    const { error } = await supabase.rpc('increment_job_views', { job_id: jobId })
+    if (error) throw error
+    return NextResponse.json({ ok: true })
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 })
+  }
+}
+ENDOFFILE
+
+echo "✅ app/api/jobs/view/route.ts"
+
+# ─────────────────────────────────────────────────────────────────
+# 2. Страница вакансии — инкремент + показ для HR/admin
+# ─────────────────────────────────────────────────────────────────
+mkdir -p "app/jobs/[id]"
+
+cat > "app/jobs/[id]/page.tsx" << 'ENDOFFILE'
 'use client'
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useParams } from 'next/navigation'
+import Link from 'next/link'
+import { MapPin, ArrowLeft, Building2, Clock, Briefcase, DollarSign, Hash, Send, ExternalLink, Eye } from 'lucide-react'
 import { supabase } from '@/lib/supabaseClient'
+import { cn } from '@/lib/utils'
 
-type Status = 'ok' | 'error' | 'loading' | 'timeout'
-interface Check { name: string; status: Status; latency?: number; detail?: string }
+const FORMAT_RU:   Record<string,string> = { remote:'Удалённо', office:'Офис', hybrid:'Гибрид' }
+const LEVEL_RU:    Record<string,string> = { junior:'Junior', middle:'Middle', senior:'Senior', lead:'Lead', any:'Любой' }
+const TYPE_RU:     Record<string,string> = { 'full-time':'Полная', 'part-time':'Частичная', contract:'Контракт', freelance:'Фриланс', internship:'Стажировка' }
+const CONTRACT_RU: Record<string,string> = { trud:'Трудовой', gph:'ГПХ', ip:'С ИП', selfemployed:'Самозанятый' }
+const SPHERE_RU:   Record<string,string> = { it:'IT', design:'Дизайн', marketing:'Маркетинг', finance:'Финансы', hr:'HR', sales:'Продажи', legal:'Юриспруденция', other:'Другое' }
+const FC: Record<string,string> = { remote:'bg-emerald-50 text-emerald-700 border-emerald-100', office:'bg-blue-50 text-blue-700 border-blue-100', hybrid:'bg-amber-50 text-amber-700 border-amber-100' }
+const LC: Record<string,string> = { junior:'bg-green-50 text-green-700 border-green-100', middle:'bg-blue-50 text-blue-700 border-blue-100', senior:'bg-purple-50 text-purple-700 border-purple-100', lead:'bg-amber-50 text-amber-700 border-amber-100' }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`Таймаут ${ms}ms`)), ms)),
-  ])
+function fmtSalary(min?: number, max?: number) {
+  if (!min && !max) return null
+  const f = (n: number) => n >= 1000 ? `${Math.round(n / 1000)}к` : String(n)
+  if (min && max) return `${f(min)} — ${f(max)} ₽`
+  if (min) return `от ${f(min)} ₽`
+  return `до ${f(max!)} ₽`
 }
 
-async function runCheck(name: string, fn: () => Promise<string>, ms = 5000): Promise<Check> {
-  const t0 = Date.now()
-  try {
-    const detail = await withTimeout(fn(), ms)
-    return { name, status: 'ok', latency: Date.now() - t0, detail }
-  } catch (e: any) {
-    return { name, status: e.message?.includes('Таймаут') ? 'timeout' : 'error', latency: Date.now() - t0, detail: e.message }
-  }
+function timeAgo(s: string) {
+  const d = Math.floor((Date.now() - new Date(s).getTime()) / 86400000)
+  if (d === 0) return 'сегодня'
+  if (d === 1) return 'вчера'
+  if (d < 7)  return `${d} дн. назад`
+  return `${Math.floor(d / 7)} нед. назад`
 }
 
-const INITIAL: Check[] = [
-  { name: 'Auth — getSession',      status: 'loading' },
-  { name: 'DB — jobs (SELECT)',     status: 'loading' },
-  { name: 'DB — resumes (SELECT)',  status: 'loading' },
-  { name: 'DB — settings (SELECT)', status: 'loading' },
-  { name: 'DB — users (SELECT)',    status: 'loading' },
-  { name: 'Env — SUPABASE_URL',     status: 'loading' },
-  { name: 'Env — APP_URL',          status: 'loading' },
-]
+function pluralViews(n: number) {
+  if (n % 10 === 1 && n % 100 !== 11) return 'просмотр'
+  if ([2,3,4].includes(n % 10) && ![12,13,14].includes(n % 100)) return 'просмотра'
+  return 'просмотров'
+}
 
-export default function StatusPage() {
-  const router = useRouter()
-  const [checks, setChecks]         = useState<Check[]>(INITIAL)
-  const [runAt, setRunAt]           = useState('')
-  const [running, setRunning]       = useState(false)
-  const [authState, setAuthState]   = useState<'checking' | 'allowed' | 'denied'>('checking')
-  const [accessMode, setAccessMode] = useState<'admin' | 'hidden' | null>(null)
-
-  // ── Проверка доступа ───────────────────────────────────────────
-  useEffect(() => {
-    const checkAccess = async () => {
-      // 1. localStorage — быстрый путь, не требует авторизации
-      try {
-        if (localStorage.getItem('hiddenOptions') === 'yess') {
-          setAccessMode('hidden')
-          setAuthState('allowed')
-          return
-        }
-      } catch (_) {
-        // localStorage недоступен (SSR / приватный режим) — идём дальше
-      }
-
-      // 2. Проверяем роль admin через Supabase
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session) { setAuthState('denied'); return }
-
-      const { data } = await supabase
-        .from('users').select('role').eq('id', session.user.id).maybeSingle()
-
-      if (data?.role === 'admin') {
-        setAccessMode('admin')
-        setAuthState('allowed')
-      } else {
-        setAuthState('denied')
-      }
-    }
-    checkAccess()
-  }, [])
-
-  // Редирект если нет доступа
-  useEffect(() => {
-    if (authState === 'denied') router.replace('/')
-  }, [authState, router])
-
-  // ── Диагностика ────────────────────────────────────────────────
-  const updateCheck = (name: string, result: Check) =>
-    setChecks(prev => prev.map(c => c.name === name ? result : c))
-
-  const runAll = async () => {
-    setRunning(true)
-    setRunAt(new Date().toLocaleTimeString('ru-RU'))
-    setChecks(INITIAL)
-
-    const checkDefs = [
-      {
-        name: 'Auth — getSession',
-        fn: async () => {
-          const { data, error } = await supabase.auth.getSession()
-          if (error) throw new Error(error.message)
-          return data.session ? `Залогинен: ${data.session.user.email}` : 'Анонимный пользователь'
-        },
-      },
-      {
-        name: 'DB — jobs (SELECT)',
-        fn: async () => {
-          const { count, error } = await supabase.from('jobs').select('id', { count: 'exact', head: true })
-          if (error) throw new Error(error.message)
-          return `${count ?? 0} записей`
-        },
-      },
-      {
-        name: 'DB — resumes (SELECT)',
-        fn: async () => {
-          const { count, error } = await supabase.from('resumes').select('id', { count: 'exact', head: true })
-          if (error) throw new Error(error.message)
-          return `${count ?? 0} записей`
-        },
-      },
-      {
-        name: 'DB — settings (SELECT)',
-        fn: async () => {
-          const { data, error } = await supabase
-            .from('settings').select('header_enabled,telegram_autopost_enabled').eq('id', 1).maybeSingle()
-          if (error) throw new Error(error.message)
-          if (!data) throw new Error('Нет строки settings с id=1')
-          return `hero=${data.header_enabled} tg=${data.telegram_autopost_enabled}`
-        },
-      },
-      {
-        name: 'DB — users (SELECT)',
-        fn: async () => {
-          const { data: auth } = await supabase.auth.getSession()
-          if (!auth.session) return 'Пропущено (не авторизован)'
-          const { data, error } = await supabase
-            .from('users').select('role').eq('id', auth.session.user.id).maybeSingle()
-          if (error) throw new Error(error.message)
-          if (!data) throw new Error('Нет записи в public.users — триггер не сработал при регистрации')
-          return `role = ${data.role}`
-        },
-      },
-      {
-        name: 'Env — SUPABASE_URL',
-        fn: async () => {
-          const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-          if (!url) throw new Error('Не задан')
-          return url
-        },
-      },
-      {
-        name: 'Env — APP_URL',
-        fn: async () => {
-          const url = process.env.NEXT_PUBLIC_APP_URL
-          if (!url) throw new Error('NEXT_PUBLIC_APP_URL не задан')
-          return url
-        },
-      },
-    ]
-
-    await Promise.all(
-      checkDefs.map(({ name, fn }) =>
-        runCheck(name, fn, 5000).then(result => updateCheck(name, result))
-      )
-    )
-    setRunning(false)
-  }
-
-  useEffect(() => {
-    if (authState === 'allowed') runAll()
-  }, [authState])
-
-  // ── Экраны ожидания / отказа ───────────────────────────────────
-  if (authState === 'checking') return (
-    <div className="min-h-screen bg-[#0F172A] flex items-center justify-center">
-      <div className="text-center">
-        <div className="w-8 h-8 border-2 border-[#334155] border-t-[#7C3AED] rounded-full animate-spin mx-auto mb-3"/>
-        <p className="text-[#475569] text-sm font-mono">Проверка доступа...</p>
-      </div>
-    </div>
-  )
-
-  if (authState === 'denied') return (
-    <div className="min-h-screen bg-[#0F172A] flex items-center justify-center">
-      <div className="text-center">
-        <p className="text-red-400 text-sm font-mono">⛔ Доступ запрещён</p>
-        <p className="text-[#475569] text-xs mt-1">Перенаправление...</p>
-      </div>
-    </div>
-  )
-
-  // ── Основной UI ────────────────────────────────────────────────
-  const allOk     = checks.every(c => c.status === 'ok')
-  const isLoading = checks.some(c => c.status === 'loading')
-
-  const statusIcon = (s: Status) => {
-    if (s === 'loading') return <span className="inline-block w-3 h-3 border border-[#475569] border-t-amber-400 rounded-full animate-spin"/>
-    if (s === 'ok')      return <span className="text-green-400 text-base">✓</span>
-    if (s === 'timeout') return <span className="text-amber-400 text-base">⏱</span>
-    return <span className="text-red-500 text-base">✗</span>
-  }
-
-  const latencyColor = (ms?: number) => {
-    if (!ms) return ''
-    if (ms < 400)  return 'text-green-400 bg-green-400/10'
-    if (ms < 1500) return 'text-amber-400 bg-amber-400/10'
-    return 'text-red-400 bg-red-400/10'
-  }
+function ApplyBlock({ job, canSeeViews }: { job: any; canSeeViews: boolean }) {
+  const salary      = fmtSalary(job.salary_min, job.salary_max)
+  const isTg        = job.contact?.startsWith('@')
+  const contactHref = isTg ? `https://t.me/${job.contact.slice(1)}` : job.contact ? `mailto:${job.contact}` : null
 
   return (
-    <div className="min-h-screen bg-[#0F172A] text-white px-4 py-12 font-mono">
-      <div className="max-w-2xl mx-auto">
+    <>
+      <style>{`
+        @keyframes levitate  { 0%,100%{transform:translateY(0px) rotate(-1deg)} 50%{transform:translateY(-8px) rotate(1deg)} }
+        @keyframes levitate2 { 0%,100%{transform:translateY(0px) rotate(2deg)}  50%{transform:translateY(-6px) rotate(-1deg)} }
+        @keyframes orb-pulse { 0%,100%{transform:scale(1);opacity:0.4} 50%{transform:scale(1.15);opacity:0.6} }
+        .levitate  { animation: levitate  3.2s ease-in-out infinite; }
+        .levitate2 { animation: levitate2 2.8s ease-in-out infinite; }
+        .orb-pulse { animation: orb-pulse 4s   ease-in-out infinite; }
+      `}</style>
 
-        <div className="flex items-center justify-between mb-8">
-          <div>
-            <div className="flex items-center gap-3 mb-1 flex-wrap">
-              <div className={`w-3 h-3 rounded-full transition-colors ${isLoading ? 'bg-amber-400 animate-pulse' : allOk ? 'bg-green-400' : 'bg-red-500'}`}/>
-              <h1 className="text-lg font-bold tracking-tight">System Status</h1>
-              <span className="text-xs text-[#475569] bg-[#1E293B] px-2 py-0.5 rounded border border-[#334155]">ВакансияРФ</span>
-              {accessMode === 'admin' && (
-                <span className="text-xs text-[#7C3AED] bg-[#7C3AED]/10 px-2 py-0.5 rounded border border-[#7C3AED]/20">admin</span>
-              )}
-              {accessMode === 'hidden' && (
-                <span className="text-xs text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded border border-amber-400/20">hidden access</span>
-              )}
-            </div>
-            {runAt && <p className="text-xs text-[#475569] pl-6">Проверка в {runAt}</p>}
-          </div>
-          <button onClick={runAll} disabled={running}
-            className="flex items-center gap-2 h-8 px-4 bg-[#1E293B] hover:bg-[#334155] border border-[#334155] text-xs rounded-lg transition-colors disabled:opacity-40">
-            {running ? <span className="w-3 h-3 border border-[#475569] border-t-white rounded-full animate-spin"/> : <span>↻</span>}
-            {running ? 'Проверка...' : 'Повторить'}
-          </button>
-        </div>
+      <div className="relative overflow-hidden rounded-[28px] bg-white border border-[#E5E7EB] shadow-[0_20px_60px_-10px_rgba(124,58,237,0.18)]">
+        <div className="absolute -top-8 -right-8 w-28 h-28 rounded-full bg-gradient-to-br from-[#A78BFA] to-[#7C3AED] orb-pulse pointer-events-none" style={{filter:'blur(2px)',opacity:0.3}}/>
+        <div className="absolute -bottom-6 -left-6 w-20 h-20 rounded-full bg-gradient-to-br from-[#10B981] to-[#059669] orb-pulse pointer-events-none" style={{filter:'blur(3px)',opacity:0.2,animationDelay:'1.5s'}}/>
 
-        <div className={`rounded-xl border p-3.5 mb-5 text-sm font-medium ${
-          isLoading ? 'bg-amber-500/10 border-amber-500/20 text-amber-400' :
-          allOk     ? 'bg-green-500/10  border-green-500/20  text-green-400' :
-                      'bg-red-500/10    border-red-500/20    text-red-400'
-        }`}>
-          {isLoading ? '⏳ Выполняется проверка...' :
-           allOk     ? '✅ Все системы работают нормально' :
-           `⛔ Проблемы: ${checks.filter(c => c.status !== 'ok').length} из ${checks.length}`}
-        </div>
-
-        <div className="space-y-1.5">
-          {checks.map(c => (
-            <div key={c.name} className={`bg-[#1E293B] border rounded-lg px-4 py-3 flex items-center gap-3 ${
-              c.status === 'error' ? 'border-red-500/40' : c.status === 'timeout' ? 'border-amber-500/40' : 'border-[#334155]'
-            }`}>
-              <div className="shrink-0 w-5 flex justify-center">{statusIcon(c.status)}</div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm text-[#CBD5E1]">{c.name}</p>
-                {c.detail && (
-                  <p className={`text-xs mt-0.5 truncate ${
-                    c.status === 'error' ? 'text-red-400' : c.status === 'timeout' ? 'text-amber-400' : 'text-[#475569]'
-                  }`}>{c.detail}</p>
-                )}
+        <div className="relative p-6">
+          <div className="flex justify-center mb-5">
+            <div className="levitate inline-flex items-center gap-2.5 bg-[#F8FAFC] border border-[#E5E7EB] rounded-2xl px-4 py-2.5 shadow-[0_8px_24px_rgba(0,0,0,0.08)]">
+              <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[#7C3AED] to-[#A78BFA] flex items-center justify-center text-white text-sm font-bold shrink-0">
+                {job.company.charAt(0)}
               </div>
-              {c.latency !== undefined && (
-                <span className={`shrink-0 text-[11px] px-2 py-0.5 rounded font-medium ${latencyColor(c.latency)}`}>
-                  {c.latency}ms
-                </span>
-              )}
+              <div>
+                <p className="text-sm font-bold text-[#0F172A] leading-none">{job.company}</p>
+                {job.location && <p className="text-[11px] text-[#94A3B8] mt-0.5">{job.location}</p>}
+              </div>
             </div>
-          ))}
-        </div>
+          </div>
 
-        <div className="mt-5 bg-[#1E293B] border border-[#334155] rounded-xl p-4 space-y-1.5">
-          <p className="text-[#64748B] text-xs font-semibold uppercase tracking-widest mb-3">Environment</p>
-          {([
-            ['NEXT_PUBLIC_SUPABASE_URL',      process.env.NEXT_PUBLIC_SUPABASE_URL],
-            ['NEXT_PUBLIC_SUPABASE_ANON_KEY', process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY],
-            ['NEXT_PUBLIC_APP_URL',           process.env.NEXT_PUBLIC_APP_URL],
-          ] as [string, string | undefined][]).map(([key, val]) => (
-            <div key={key} className="flex items-center justify-between gap-4">
-              <span className="text-xs text-[#475569]">{key}</span>
-              <span className={`text-xs font-medium ${val ? 'text-green-400' : 'text-red-400'}`}>
-                {val ? (key.includes('KEY') ? '✓ задан (скрыт)' : val) : '✗ не задан'}
+          {salary && (
+            <div className="levitate2 text-center mb-5">
+              <span className="inline-block bg-gradient-to-r from-[#059669] to-[#10B981] text-white text-lg font-black px-5 py-2 rounded-2xl shadow-[0_6px_20px_rgba(16,185,129,0.35)] tracking-tight">{salary}</span>
+              <p className="text-[11px] text-[#94A3B8] mt-1.5 font-medium">в месяц</p>
+            </div>
+          )}
+
+          <div className="border-t border-dashed border-[#E5E7EB] mb-5"/>
+
+          <div className="space-y-2.5">
+            {contactHref ? (
+              <a href={contactHref} target="_blank" rel="noopener noreferrer"
+                className="group flex items-center justify-between w-full px-5 py-3.5 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#6D28D9] text-white font-bold text-sm shadow-[0_8px_24px_rgba(124,58,237,0.35)] hover:shadow-[0_12px_32px_rgba(124,58,237,0.45)] hover:-translate-y-0.5 transition-all duration-200">
+                <span className="flex items-center gap-2.5">
+                  {isTg ? <Send size={16} className="shrink-0"/> : <ExternalLink size={16} className="shrink-0"/>}
+                  {isTg ? 'Написать в Telegram' : 'Написать на email'}
+                </span>
+                <span className="text-white/60 group-hover:text-white transition-colors text-lg leading-none">→</span>
+              </a>
+            ) : (
+              <div className="flex items-center justify-center gap-2 w-full px-5 py-3.5 rounded-2xl bg-[#F1F5F9] text-[#94A3B8] text-sm font-medium">
+                Контакт не указан
+              </div>
+            )}
+
+            <a href="https://t.me/joba_box" target="_blank" rel="noopener noreferrer"
+              className="group flex items-center justify-between w-full px-5 py-3.5 rounded-2xl bg-[#EFF6FF] border border-[#BFDBFE] text-[#2563EB] font-semibold text-sm hover:bg-[#DBEAFE] hover:border-[#93C5FD] hover:-translate-y-0.5 transition-all duration-200">
+              <span className="flex items-center gap-2.5">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="shrink-0">
+                  <path d="M22 2L11 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                Все вакансии в канале
+              </span>
+              <span className="text-[#93C5FD] group-hover:text-[#2563EB] transition-colors font-bold">@joba_box</span>
+            </a>
+          </div>
+
+          <div className="mt-3 pt-3 border-t border-dashed border-[#E5E7EB] flex items-center justify-center gap-3">
+            <p className="text-[11px] text-[#CBD5E1] flex items-center gap-1">
+              <Clock size={11}/>Опубликовано {timeAgo(job.created_at)}
+            </p>
+            {canSeeViews && (
+              <>
+                <span className="text-[#E5E7EB]">·</span>
+                <p className="text-[11px] text-[#94A3B8] flex items-center gap-1">
+                  <Eye size={11}/>{job.views ?? 0} {pluralViews(job.views ?? 0)}
+                </p>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-5 shadow-[0_4px_20px_rgba(0,0,0,0.06)] hover:shadow-[0_8px_30px_rgba(0,0,0,0.09)] transition-shadow duration-300">
+        <p className="text-[10px] font-bold text-[#94A3B8] uppercase tracking-widest mb-4">О вакансии</p>
+        <div className="space-y-3">
+          {job.format && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[#94A3B8]">Формат</span>
+              <span className={cn('text-xs font-semibold px-2.5 py-1 rounded-full border', FC[job.format] || 'bg-gray-50 text-gray-600')}>{FORMAT_RU[job.format]}</span>
+            </div>
+          )}
+          {job.experience_level && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[#94A3B8]">Уровень</span>
+              <span className={cn('text-xs font-semibold px-2.5 py-1 rounded-full border', LC[job.experience_level] || 'bg-gray-50 text-gray-600')}>{LEVEL_RU[job.experience_level]}</span>
+            </div>
+          )}
+          {job.job_type && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[#94A3B8]">Занятость</span>
+              <span className="text-xs font-semibold text-[#0F172A]">{TYPE_RU[job.job_type]}</span>
+            </div>
+          )}
+          {job.contract_type && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[#94A3B8]">Договор</span>
+              <span className="text-xs font-semibold text-[#7C3AED]">{CONTRACT_RU[job.contract_type]}</span>
+            </div>
+          )}
+          {job.location && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[#94A3B8]">Город</span>
+              <span className="text-xs font-semibold text-[#0F172A] flex items-center gap-1">
+                <MapPin size={11} className="text-[#94A3B8]"/>{job.location}
               </span>
             </div>
-          ))}
+          )}
         </div>
+      </div>
+    </>
+  )
+}
 
-        <div className="mt-4 bg-[#1E293B] border border-[#334155] rounded-xl p-4">
-          <p className="text-[#64748B] text-xs font-semibold uppercase tracking-widest mb-2">Заметки</p>
-          <p className="text-xs text-[#475569] leading-relaxed">
-            На Free (Nano) плане Supabase засыпает после ~10 минут неактивности.
-            Первый запрос занимает 2–5 сек. Если таймауты — подожди 10 сек и нажми «Повторить».
-          </p>
+export default function JobDetailPage() {
+  const { id } = useParams() as { id: string }
+  const [job, setJob]                 = useState<any>(null)
+  const [loading, setLoading]         = useState(true)
+  const [canSeeViews, setCanSeeViews] = useState(false)
+
+  useEffect(() => {
+    if (!id) return
+
+    // Загружаем вакансию
+    supabase.from('jobs').select('*').eq('id', id).single()
+      .then(({ data }) => { setJob(data); setLoading(false) })
+
+    // Инкремент просмотра — fire and forget
+    fetch('/api/jobs/view', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId: id }),
+    }).catch(() => {})
+
+    // Проверяем роль
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session) return
+      supabase.from('users').select('role').eq('id', session.user.id).maybeSingle()
+        .then(({ data }) => {
+          if (data?.role === 'admin' || data?.role === 'hr') setCanSeeViews(true)
+        })
+    })
+  }, [id])
+
+  if (loading) return (
+    <div className="flex justify-center py-32">
+      <div className="w-8 h-8 border-2 border-[#E5E7EB] border-t-[#7C3AED] rounded-full animate-spin"/>
+    </div>
+  )
+
+  if (!job) return (
+    <div className="max-w-3xl mx-auto px-4 py-20 text-center">
+      <h1 className="text-2xl font-bold text-[#0F172A] mb-2">Вакансия не найдена</h1>
+      <p className="text-sm text-[#64748B] mb-4">Возможно, она была удалена или ещё не опубликована.</p>
+      <Link href="/" className="text-[#7C3AED] hover:underline text-sm">← Вернуться к вакансиям</Link>
+    </div>
+  )
+
+  const salary = fmtSalary(job.salary_min, job.salary_max)
+
+  return (
+    <div className="bg-[#F8FAFC] min-h-screen">
+      <div className="max-w-4xl mx-auto px-4 py-8">
+        <Link href="/" className="inline-flex items-center gap-1.5 text-sm text-[#64748B] hover:text-[#0F172A] mb-6 transition-colors">
+          <ArrowLeft size={14}/>Назад к вакансиям
+        </Link>
+        <div className="grid lg:grid-cols-[1fr_300px] gap-6">
+          <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-7 shadow-sm">
+            <div className="flex gap-2 mb-4 flex-wrap">
+              {job.sphere && <span className="text-xs font-medium text-[#64748B] bg-[#F1F5F9] border border-[#E5E7EB] px-2.5 py-1 rounded-full">{SPHERE_RU[job.sphere] || job.sphere}</span>}
+              {job.experience_level && <span className={cn('text-xs font-medium px-2.5 py-1 rounded-full border', LC[job.experience_level] || 'bg-gray-50 text-gray-600 border-gray-100')}>{LEVEL_RU[job.experience_level]}</span>}
+            </div>
+            <h1 className="text-2xl font-bold text-[#0F172A] mb-2 leading-tight">{job.title}</h1>
+            <div className="flex items-center justify-between mb-5">
+              <div className="flex items-center gap-2 text-[#7C3AED] font-semibold"><Building2 size={15}/>{job.company}</div>
+              {canSeeViews && (
+                <div className="flex items-center gap-1 text-[#94A3B8] text-xs bg-[#F8FAFC] px-2.5 py-1 rounded-full border border-[#E5E7EB]">
+                  <Eye size={12}/><span>{job.views ?? 0} {pluralViews(job.views ?? 0)}</span>
+                </div>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2 mb-6">
+              {job.format && <span className={cn('flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border', FC[job.format] || 'bg-gray-50 text-gray-600 border-gray-100')}><MapPin size={13}/>{FORMAT_RU[job.format]}</span>}
+              {job.job_type && <span className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border border-[#E5E7EB] bg-[#F8FAFC] text-[#64748B]"><Briefcase size={13}/>{TYPE_RU[job.job_type]}</span>}
+              {job.contract_type && <span className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border border-[#DDD6FE] bg-[#EDE9FE] text-[#7C3AED]">{CONTRACT_RU[job.contract_type]}</span>}
+              {salary && <span className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border bg-[#F0FDF4] text-[#059669] border-[#D1FAE5]"><DollarSign size={13}/>{salary}</span>}
+              <span className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border border-[#E5E7EB] bg-[#F8FAFC] text-[#94A3B8]"><Clock size={13}/>{timeAgo(job.created_at)}</span>
+            </div>
+            {job.skills?.length > 0 && (
+              <div className="mb-6 pb-6 border-b border-[#E5E7EB]">
+                <p className="text-xs font-semibold text-[#64748B] uppercase tracking-wide mb-2">Стек / Навыки</p>
+                <div className="flex flex-wrap gap-2">{job.skills.map((s: string) => <span key={s} className="text-xs px-2.5 py-1 rounded-full bg-[#EDE9FE] text-[#7C3AED] border border-[#DDD6FE] font-medium">{s}</span>)}</div>
+              </div>
+            )}
+            {job.tags?.length > 0 && (
+              <div className="mb-6 pb-6 border-b border-[#E5E7EB]">
+                <p className="text-xs font-semibold text-[#64748B] uppercase tracking-wide mb-2 flex items-center gap-1"><Hash size={11}/>Теги</p>
+                <div className="flex flex-wrap gap-1.5">{job.tags.map((t: string) => <span key={t} className="text-xs px-2 py-0.5 rounded-full bg-[#F0FDF4] text-[#16A34A] border border-[#BBF7D0]">{t}</span>)}</div>
+              </div>
+            )}
+            <div>
+              <p className="text-xs font-semibold text-[#64748B] uppercase tracking-wide mb-3">Описание</p>
+              <div className="text-sm text-[#0F172A] leading-relaxed whitespace-pre-wrap">{job.description}</div>
+            </div>
+          </div>
+          <div className="space-y-4"><ApplyBlock job={job} canSeeViews={canSeeViews}/></div>
         </div>
-
-        <p className="text-center text-[#1E293B] text-xs mt-8 select-none">/status · только для администраторов</p>
       </div>
     </div>
   )
 }
 ENDOFFILE
 
+echo "✅ app/jobs/[id]/page.tsx"
+
 rm -rf .next
-echo "✅ /status — доступ: admin ИЛИ localStorage.hiddenOptions === 'yess'"
-echo "npm run dev → http://localhost:3000/status"
+
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo "  ⚠️  Запусти в Supabase → SQL Editor:"
+echo ""
+echo "  ALTER TABLE public.jobs"
+echo "    ADD COLUMN IF NOT EXISTS views integer NOT NULL DEFAULT 0;"
+echo ""
+echo "  CREATE OR REPLACE FUNCTION increment_job_views(job_id uuid)"
+echo "  RETURNS void LANGUAGE sql SECURITY DEFINER AS \$\$"
+echo "    UPDATE public.jobs SET views = views + 1 WHERE id = job_id;"
+echo "  \$\$;"
+echo "════════════════════════════════════════════════════════════"
+echo ""
+echo "npm run dev"

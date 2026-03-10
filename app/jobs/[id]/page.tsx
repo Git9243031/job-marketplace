@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
-import { MapPin, ArrowLeft, Building2, Clock, Briefcase, DollarSign, Hash, Send, ExternalLink } from 'lucide-react'
+import { MapPin, ArrowLeft, Building2, Clock, Briefcase, DollarSign, Hash, Send, ExternalLink, Eye } from 'lucide-react'
 import { supabase } from '@/lib/supabaseClient'
 import { cn } from '@/lib/utils'
 
@@ -30,7 +30,13 @@ function timeAgo(s: string) {
   return `${Math.floor(d / 7)} нед. назад`
 }
 
-function ApplyBlock({ job }: { job: any }) {
+function pluralViews(n: number) {
+  if (n % 10 === 1 && n % 100 !== 11) return 'просмотр'
+  if ([2,3,4].includes(n % 10) && ![12,13,14].includes(n % 100)) return 'просмотра'
+  return 'просмотров'
+}
+
+function ApplyBlock({ job, canSeeViews }: { job: any; canSeeViews: boolean }) {
   const salary      = fmtSalary(job.salary_min, job.salary_max)
   const isTg        = job.contact?.startsWith('@')
   const contactHref = isTg ? `https://t.me/${job.contact.slice(1)}` : job.contact ? `mailto:${job.contact}` : null
@@ -49,8 +55,8 @@ function ApplyBlock({ job }: { job: any }) {
       <div className="relative overflow-hidden rounded-[28px] bg-white border border-[#E5E7EB] shadow-[0_20px_60px_-10px_rgba(124,58,237,0.18)]">
         <div className="absolute -top-8 -right-8 w-28 h-28 rounded-full bg-gradient-to-br from-[#A78BFA] to-[#7C3AED] orb-pulse pointer-events-none" style={{filter:'blur(2px)',opacity:0.3}}/>
         <div className="absolute -bottom-6 -left-6 w-20 h-20 rounded-full bg-gradient-to-br from-[#10B981] to-[#059669] orb-pulse pointer-events-none" style={{filter:'blur(3px)',opacity:0.2,animationDelay:'1.5s'}}/>
-        <div className="relative p-6">
 
+        <div className="relative p-6">
           <div className="flex justify-center mb-5">
             <div className="levitate inline-flex items-center gap-2.5 bg-[#F8FAFC] border border-[#E5E7EB] rounded-2xl px-4 py-2.5 shadow-[0_8px_24px_rgba(0,0,0,0.08)]">
               <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[#7C3AED] to-[#A78BFA] flex items-center justify-center text-white text-sm font-bold shrink-0">
@@ -101,9 +107,19 @@ function ApplyBlock({ job }: { job: any }) {
             </a>
           </div>
 
-          <p className="text-center text-[11px] text-[#CBD5E1] mt-4 flex items-center justify-center gap-1">
-            <Clock size={11}/>Опубликовано {timeAgo(job.created_at)}
-          </p>
+          <div className="mt-3 pt-3 border-t border-dashed border-[#E5E7EB] flex items-center justify-center gap-3">
+            <p className="text-[11px] text-[#CBD5E1] flex items-center gap-1">
+              <Clock size={11}/>Опубликовано {timeAgo(job.created_at)}
+            </p>
+            {canSeeViews && (
+              <>
+                <span className="text-[#E5E7EB]">·</span>
+                <p className="text-[11px] text-[#94A3B8] flex items-center gap-1">
+                  <Eye size={11}/>{job.views ?? 0} {pluralViews(job.views ?? 0)}
+                </p>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -150,13 +166,32 @@ function ApplyBlock({ job }: { job: any }) {
 
 export default function JobDetailPage() {
   const { id } = useParams() as { id: string }
-  const [job, setJob]         = useState<any>(null)
-  const [loading, setLoading] = useState(true)
+  const [job, setJob]                 = useState<any>(null)
+  const [loading, setLoading]         = useState(true)
+  const [canSeeViews, setCanSeeViews] = useState(false)
 
   useEffect(() => {
     if (!id) return
+
+    // Загружаем вакансию
     supabase.from('jobs').select('*').eq('id', id).single()
       .then(({ data }) => { setJob(data); setLoading(false) })
+
+    // Инкремент просмотра — fire and forget
+    fetch('/api/jobs/view', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId: id }),
+    }).catch(() => {})
+
+    // Проверяем роль
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session) return
+      supabase.from('users').select('role').eq('id', session.user.id).maybeSingle()
+        .then(({ data }) => {
+          if (data?.role === 'admin' || data?.role === 'hr') setCanSeeViews(true)
+        })
+    })
   }, [id])
 
   if (loading) return (
@@ -188,7 +223,14 @@ export default function JobDetailPage() {
               {job.experience_level && <span className={cn('text-xs font-medium px-2.5 py-1 rounded-full border', LC[job.experience_level] || 'bg-gray-50 text-gray-600 border-gray-100')}>{LEVEL_RU[job.experience_level]}</span>}
             </div>
             <h1 className="text-2xl font-bold text-[#0F172A] mb-2 leading-tight">{job.title}</h1>
-            <div className="flex items-center gap-2 text-[#7C3AED] font-semibold mb-5"><Building2 size={15}/>{job.company}</div>
+            <div className="flex items-center justify-between mb-5">
+              <div className="flex items-center gap-2 text-[#7C3AED] font-semibold"><Building2 size={15}/>{job.company}</div>
+              {canSeeViews && (
+                <div className="flex items-center gap-1 text-[#94A3B8] text-xs bg-[#F8FAFC] px-2.5 py-1 rounded-full border border-[#E5E7EB]">
+                  <Eye size={12}/><span>{job.views ?? 0} {pluralViews(job.views ?? 0)}</span>
+                </div>
+              )}
+            </div>
             <div className="flex flex-wrap gap-2 mb-6">
               {job.format && <span className={cn('flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border', FC[job.format] || 'bg-gray-50 text-gray-600 border-gray-100')}><MapPin size={13}/>{FORMAT_RU[job.format]}</span>}
               {job.job_type && <span className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border border-[#E5E7EB] bg-[#F8FAFC] text-[#64748B]"><Briefcase size={13}/>{TYPE_RU[job.job_type]}</span>}
@@ -213,7 +255,7 @@ export default function JobDetailPage() {
               <div className="text-sm text-[#0F172A] leading-relaxed whitespace-pre-wrap">{job.description}</div>
             </div>
           </div>
-          <div className="space-y-4"><ApplyBlock job={job}/></div>
+          <div className="space-y-4"><ApplyBlock job={job} canSeeViews={canSeeViews}/></div>
         </div>
       </div>
     </div>
