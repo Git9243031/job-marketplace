@@ -1,204 +1,568 @@
 #!/bin/bash
-# cd job-marketplace && bash ../fix-rls-admin-settings.sh
+# cd job-marketplace && bash ../fix-hr-redirect-health.sh
 set -e
 
-echo "🔧 Фикс RLS + настройки админки (чистый bash)..."
+echo "🔧 Фикс: HR редирект + бесконечный лоадер + health-check страница..."
 
 # ─────────────────────────────────────────────────────────────────
-# 1. ADMIN PAGE — полная перезапись settings-таба
-#    Читаем текущий файл, вырезаем кусок с settings-табом,
-#    вставляем чистую версию без дублей
+# 1. HR DASHBOARD — проблема в getMyJobs, он делает запрос
+#    с фильтром visible=true через RLS, а HR-у нужны ВСЕ его вакансии
+#    включая невидимые. Если запрос падает — loading зависает навсегда.
+#    Добавляем timeout + fallback + исправляем запрос своих вакансий.
 # ─────────────────────────────────────────────────────────────────
+cat > app/dashboard/hr/page.tsx << 'EOF'
+'use client'
+import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+import { Plus, Briefcase, LogOut, Eye } from 'lucide-react'
+import { supabase } from '@/lib/supabaseClient'
 
-ADMIN_FILE="app/dashboard/admin/page.tsx"
+const SPHERE_RU: Record<string,string> = {
+  it:'IT', design:'Дизайн', marketing:'Маркетинг',
+  finance:'Финансы', hr:'HR', sales:'Продажи',
+  legal:'Юриспруденция', other:'Другое',
+}
 
-# Добавляем toggleAutoApproveJobs/toggleAutoApproveTelegram если их нет
-if ! grep -q "toggleAutoApproveJobs" "$ADMIN_FILE"; then
-  # Вставляем после toggleHeader функции
-  sed -i "s/const toggleHeader = async () => {/const toggleAutoApproveJobs = async () => {\n    const next = !settings.auto_approve_jobs\n    await supabase.from('settings').update({ auto_approve_jobs: next }).eq('id', 1)\n    setSettings(s => ({ ...s, auto_approve_jobs: next }))\n  }\n  const toggleAutoApproveTelegram = async () => {\n    const next = !settings.auto_approve_telegram\n    await supabase.from('settings').update({ auto_approve_telegram: next }).eq('id', 1)\n    setSettings(s => ({ ...s, auto_approve_telegram: next }))\n  }\n  const toggleHeader = async () => {/" "$ADMIN_FILE"
-  echo "✅ toggleAutoApproveJobs\/toggleAutoApproveTelegram добавлены"
-fi
+function fmtSalary(min?: number, max?: number) {
+  if (!min && !max) return 'ЗП не указана'
+  const f = (n: number) => n >= 1000 ? `${Math.round(n/1000)}к` : String(n)
+  if (min && max) return `${f(min)}–${f(max)} ₽`
+  if (min) return `от ${f(min)} ₽`
+  return `до ${f(max!)} ₽`
+}
 
-# Расширяем state если нужно
-if ! grep -q "auto_approve_jobs" "$ADMIN_FILE"; then
-  sed -i "s/const \[settings, setSettings\] = useState({ telegram_autopost_enabled: false, header_enabled: true })/const [settings, setSettings] = useState({ telegram_autopost_enabled: false, header_enabled: true, auto_approve_jobs: false, auto_approve_telegram: false })/" "$ADMIN_FILE"
-  echo "✅ state settings расширен"
-fi
+function fmtDate(s: string) {
+  return new Date(s).toLocaleDateString('ru-RU', { day:'numeric', month:'short', year:'numeric' })
+}
 
-# Расширяем загрузку settings
-if ! grep -q "auto_approve_jobs.*data\." "$ADMIN_FILE"; then
-  sed -i "s/if (s\.data) setSettings({ telegram_autopost_enabled: s\.data\.telegram_autopost_enabled, header_enabled: s\.data\.header_enabled ?? true })/if (s.data) setSettings({ telegram_autopost_enabled: s.data.telegram_autopost_enabled, header_enabled: s.data.header_enabled ?? true, auto_approve_jobs: s.data.auto_approve_jobs ?? false, auto_approve_telegram: s.data.auto_approve_telegram ?? false })/" "$ADMIN_FILE"
-  echo "✅ загрузка settings расширена"
-fi
+export default function HRDashboard() {
+  const [user, setUser]   = useState<any>(null)
+  const [jobs, setJobs]   = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const router = useRouter()
 
-# ─────────────────────────────────────────────────────────────────
-# Переписываем settings таб — находим строку начала и конца
-# и заменяем всё между ними через временный файл
-# ─────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false
 
-START_LINE=$(grep -n "{tab==='settings' && (" "$ADMIN_FILE" | head -1 | cut -d: -f1)
+    // Таймаут — если Supabase не ответил за 8 сек, показываем ошибку
+    const timeout = setTimeout(() => {
+      if (!cancelled) {
+        setError('Supabase не отвечает. Проверьте подключение.')
+        setLoading(false)
+      }
+    }, 8000)
 
-if [ -z "$START_LINE" ]; then
-  echo "⚠️  settings таб не найден в $ADMIN_FILE"
-else
-  echo "📍 settings таб найден на строке $START_LINE"
+    async function init() {
+      try {
+        const { data: authData } = await supabase.auth.getUser()
+        if (!authData.user) { router.push('/auth/login'); return }
 
-  # Берём всё ДО settings таба
-  head -n $((START_LINE - 1)) "$ADMIN_FILE" > /tmp/admin_before.txt
+        // Загружаем профиль
+        const { data: u, error: uErr } = await supabase
+          .from('users').select('*').eq('id', authData.user.id).single()
 
-  # Берём всё ПОСЛЕ settings таба — ищем строку с закрывающим )}
-  # settings блок заканчивается на строке с единственным )}, после которой идёт footer/закрытие
-  TOTAL=$(wc -l < "$ADMIN_FILE")
-  END_LINE=$TOTAL
+        if (uErr || !u) {
+          setError('Не удалось загрузить профиль: ' + (uErr?.message || 'нет данных'))
+          setLoading(false)
+          return
+        }
 
-  # Ищем паттерн закрытия блока settings: строка "      )}" после settings
-  AFTER_START=$((START_LINE + 1))
-  DEPTH=1
-  CUR=$AFTER_START
-  while [ $CUR -le $TOTAL ]; do
-    LINE_CONTENT=$(sed -n "${CUR}p" "$ADMIN_FILE")
-    OPENS=$(echo "$LINE_CONTENT" | tr -cd '(' | wc -c)
-    CLOSES=$(echo "$LINE_CONTENT" | tr -cd ')' | wc -c)
-    DEPTH=$(( DEPTH + OPENS - CLOSES ))
-    if [ $DEPTH -le 0 ]; then
-      END_LINE=$CUR
-      break
-    fi
-    CUR=$((CUR + 1))
-  done
+        // Проверяем роль
+        if (u.role !== 'hr' && u.role !== 'admin') {
+          router.push(u.role === 'candidate' ? '/dashboard/candidate' : '/')
+          return
+        }
 
-  echo "📍 settings таб: строки $START_LINE — $END_LINE"
+        if (cancelled) return
+        setUser(u)
 
-  # Всё после end_line
-  tail -n +$((END_LINE + 1)) "$ADMIN_FILE" > /tmp/admin_after.txt
+        // Загружаем ВСЕ вакансии HR-а (включая невидимые)
+        // Важно: запрос идёт с auth токеном, RLS политика jobs_select_own разрешает
+        const { data: myJobs, error: jErr } = await supabase
+          .from('jobs')
+          .select('*')
+          .eq('created_by', authData.user.id)
+          .order('created_at', { ascending: false })
 
-  # Новый settings блок
-  cat > /tmp/admin_settings.txt << 'SETTINGS_EOF'
-      {tab==='settings' && (
-        <div className="max-w-2xl space-y-4">
+        if (jErr) {
+          setError('Ошибка загрузки вакансий: ' + jErr.message)
+        } else {
+          setJobs(myJobs || [])
+        }
+      } catch (e: any) {
+        setError('Ошибка: ' + e.message)
+      } finally {
+        if (!cancelled) {
+          clearTimeout(timeout)
+          setLoading(false)
+        }
+      }
+    }
 
-          {/* Hero-блок */}
-          <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 shadow-sm">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="font-semibold text-[#0F172A] mb-0.5 flex items-center gap-2">
-                  <Layout size={15}/>Hero-блок на главной
-                </h3>
-                <p className="text-sm text-[#64748B]">Показывать/скрывать приветственный блок с заголовком и статистикой</p>
-                <p className={cn('text-xs mt-1 font-medium', settings.header_enabled ? 'text-green-600' : 'text-[#94A3B8]')}>
-                  {settings.header_enabled ? '✅ Виден' : '⛔ Скрыт'}
+    init()
+    return () => { cancelled = true; clearTimeout(timeout) }
+  }, [router])
+
+  const handleLogout = async () => { await supabase.auth.signOut(); router.push('/') }
+
+  if (loading) return (
+    <div className="flex flex-col items-center justify-center py-32 gap-4">
+      <div className="w-8 h-8 border-2 border-[#E5E7EB] border-t-[#7C3AED] rounded-full animate-spin"/>
+      <p className="text-sm text-[#94A3B8]">Загрузка кабинета...</p>
+    </div>
+  )
+
+  if (error) return (
+    <div className="max-w-lg mx-auto px-4 py-20 text-center">
+      <div className="text-4xl mb-4">⚠️</div>
+      <h2 className="text-lg font-bold text-[#0F172A] mb-2">Ошибка загрузки</h2>
+      <p className="text-sm text-[#64748B] mb-6">{error}</p>
+      <div className="flex gap-3 justify-center">
+        <button onClick={() => window.location.reload()}
+          className="h-9 px-4 bg-[#7C3AED] text-white text-sm rounded-[8px] hover:bg-[#6D28D9]">
+          Обновить
+        </button>
+        <Link href="/status"
+          className="h-9 px-4 border border-[#E5E7EB] text-sm rounded-[8px] text-[#64748B] hover:bg-[#F8FAFC] flex items-center">
+          Проверить статус
+        </Link>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="max-w-5xl mx-auto px-4 py-10">
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h1 className="text-2xl font-bold text-[#0F172A]">Кабинет HR</h1>
+          <p className="text-sm text-[#64748B] mt-0.5">{user?.name || user?.email}</p>
+        </div>
+        <div className="flex gap-2">
+          <Link href="/dashboard/hr/create-job"
+            className="flex items-center gap-2 h-10 px-4 bg-[#10B981] hover:bg-[#059669] text-white text-sm font-medium rounded-[10px] transition-colors">
+            <Plus size={15}/>Создать вакансию
+          </Link>
+          <button onClick={handleLogout}
+            className="flex items-center gap-2 h-10 px-4 border border-[#E5E7EB] text-[#64748B] hover:bg-[#F8FAFC] text-sm rounded-[10px]">
+            <LogOut size={14}/>Выйти
+          </button>
+        </div>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-3 gap-4 mb-8">
+        {[
+          ['Всего вакансий',   jobs.length,                          'text-[#7C3AED]'],
+          ['Опубликовано',     jobs.filter(j => j.visible).length,   'text-[#10B981]'],
+          ['На модерации',     jobs.filter(j => !j.visible).length,  'text-amber-600'],
+        ].map(([l, v, c]) => (
+          <div key={String(l)} className="bg-white rounded-[14px] border border-[#E5E7EB] p-5">
+            <p className={`text-2xl font-bold ${c}`}>{v}</p>
+            <p className="text-xs text-[#64748B] mt-1">{l}</p>
+          </div>
+        ))}
+      </div>
+
+      {jobs.length === 0 ? (
+        <div className="bg-white rounded-[20px] border border-dashed border-[#E5E7EB] p-16 text-center">
+          <Briefcase size={28} className="text-[#94A3B8] mx-auto mb-3"/>
+          <h3 className="font-semibold text-[#0F172A] mb-1">Нет вакансий</h3>
+          <p className="text-sm text-[#64748B] mb-5">Создайте первую вакансию</p>
+          <Link href="/dashboard/hr/create-job"
+            className="inline-flex items-center gap-2 h-10 px-5 bg-[#10B981] hover:bg-[#059669] text-white text-sm font-medium rounded-[10px] transition-colors">
+            <Plus size={14}/>Создать
+          </Link>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {jobs.map(job => (
+            <div key={job.id} className="bg-white rounded-[14px] border border-[#E5E7EB] p-4 flex items-center justify-between gap-4">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 mb-0.5 flex-wrap">
+                  <p className="font-medium text-[#0F172A] truncate">{job.title}</p>
+                  <span className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${job.visible ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'}`}>
+                    {job.visible ? 'Опубликовано' : 'На модерации'}
+                  </span>
+                </div>
+                <p className="text-xs text-[#64748B]">
+                  {job.company}
+                  {job.sphere ? ` · ${SPHERE_RU[job.sphere] || job.sphere}` : ''}
+                  {' · '}{fmtSalary(job.salary_min, job.salary_max)}
+                  {' · '}{fmtDate(job.created_at)}
                 </p>
               </div>
-              <button onClick={toggleHeader}>
-                {settings.header_enabled
-                  ? <ToggleRight size={40} className="text-[#7C3AED] cursor-pointer hover:opacity-80 transition-opacity"/>
-                  : <ToggleLeft  size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>
-                }
-              </button>
+              <Link href={`/jobs/${job.id}`}
+                className="w-8 h-8 rounded-[6px] border border-[#E5E7EB] flex items-center justify-center text-[#64748B] hover:text-[#7C3AED] hover:border-[#7C3AED] transition-colors">
+                <Eye size={13}/>
+              </Link>
             </div>
-          </div>
-
-          {/* Автомодерация сайта */}
-          <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 shadow-sm">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="font-semibold text-[#0F172A] mb-0.5">🛡 Автомодерация сайта</h3>
-                <p className="text-sm text-[#64748B]">Публиковать вакансии сразу без ручного одобрения</p>
-                <p className={cn('text-xs mt-1 font-medium', settings.auto_approve_jobs ? 'text-green-600' : 'text-[#94A3B8]')}>
-                  {settings.auto_approve_jobs ? '✅ Вкл — вакансии публикуются сразу' : '⛔ Выкл — вакансии ждут модерации'}
-                </p>
-              </div>
-              <button onClick={toggleAutoApproveJobs}>
-                {settings.auto_approve_jobs
-                  ? <ToggleRight size={40} className="text-[#7C3AED] cursor-pointer hover:opacity-80 transition-opacity"/>
-                  : <ToggleLeft  size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>
-                }
-              </button>
-            </div>
-          </div>
-
-          {/* Автопостинг в Telegram */}
-          <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 shadow-sm">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="font-semibold text-[#0F172A] mb-0.5">✈️ Автопостинг в Telegram</h3>
-                <p className="text-sm text-[#64748B]">Отправлять новые вакансии в канал при публикации</p>
-                <p className={cn('text-xs mt-1 font-medium', settings.auto_approve_telegram ? 'text-green-600' : 'text-[#94A3B8]')}>
-                  {settings.auto_approve_telegram ? '✅ Вкл — новые вакансии летят в TG' : '⛔ Выкл — только ручная отправка'}
-                </p>
-              </div>
-              <button onClick={toggleAutoApproveTelegram}>
-                {settings.auto_approve_telegram
-                  ? <ToggleRight size={40} className="text-[#7C3AED] cursor-pointer hover:opacity-80 transition-opacity"/>
-                  : <ToggleLeft  size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>
-                }
-              </button>
-            </div>
-          </div>
-
-          {/* Env инфо */}
-          <div className="bg-[#EDE9FE] rounded-[16px] p-5 text-sm text-[#7C3AED]">
-            <p className="font-semibold mb-2">Telegram настройки (.env.local / Vercel)</p>
-            <div className="space-y-1 text-[#6D28D9] text-xs font-mono bg-[#DDD6FE]/50 rounded-[8px] p-3">
-              <p>TELEGRAM_BOT_TOKEN=...</p>
-              <p>TELEGRAM_CHANNEL_ID=@канал</p>
-              <p>NEXT_PUBLIC_APP_URL=https://домен.ru</p>
-            </div>
-          </div>
-
+          ))}
         </div>
       )}
-SETTINGS_EOF
+    </div>
+  )
+}
+EOF
 
-  # Собираем файл
-  cat /tmp/admin_before.txt /tmp/admin_settings.txt /tmp/admin_after.txt > "$ADMIN_FILE"
-  echo "✅ settings таб перезаписан без дублей"
-
-  # Чистим временные файлы
-  rm -f /tmp/admin_before.txt /tmp/admin_settings.txt /tmp/admin_after.txt
-fi
+echo "✅ app/dashboard/hr/page.tsx — фикс редиректа + таймаут"
 
 # ─────────────────────────────────────────────────────────────────
-# 2. SQL для Supabase — выводим и сохраняем в файл
+# 2. /status — секретная страница диагностики Supabase
 # ─────────────────────────────────────────────────────────────────
-cat > /tmp/fix_rls.sql << 'SQL'
--- ═══════════════════════════════════════════════════════
--- Разрешаем анонимным пользователям читать вакансии/резюме
--- ═══════════════════════════════════════════════════════
+mkdir -p app/status
 
--- Пересоздаём политику для jobs
-DROP POLICY IF EXISTS "jobs_select_visible" ON public.jobs;
-CREATE POLICY "jobs_select_visible"
-  ON public.jobs FOR SELECT
-  USING (visible = true);
+cat > app/status/page.tsx << 'EOF'
+'use client'
+import { useEffect, useState } from 'react'
+import { supabase } from '@/lib/supabaseClient'
 
--- Пересоздаём политику для resumes
-DROP POLICY IF EXISTS "resumes_select_vis" ON public.resumes;
-CREATE POLICY "resumes_select_vis"
-  ON public.resumes FOR SELECT
-  USING (visible = true);
+interface Check {
+  name: string
+  status: 'ok' | 'error' | 'loading'
+  latency?: number
+  detail?: string
+}
 
--- Даём права anon роли
-GRANT SELECT ON public.jobs     TO anon;
-GRANT SELECT ON public.resumes  TO anon;
-GRANT SELECT ON public.settings TO anon;
+async function runCheck(name: string, fn: () => Promise<string>): Promise<Check> {
+  const t0 = Date.now()
+  try {
+    const detail = await fn()
+    return { name, status: 'ok', latency: Date.now() - t0, detail }
+  } catch (e: any) {
+    return { name, status: 'error', latency: Date.now() - t0, detail: e.message }
+  }
+}
 
--- Новые колонки для settings (если ещё не добавлены)
-ALTER TABLE public.settings
-  ADD COLUMN IF NOT EXISTS auto_approve_jobs     boolean NOT NULL DEFAULT false,
-  ADD COLUMN IF NOT EXISTS auto_approve_telegram boolean NOT NULL DEFAULT false;
+export default function StatusPage() {
+  const [checks, setChecks] = useState<Check[]>([
+    { name: 'Auth — getSession',      status: 'loading' },
+    { name: 'DB — jobs (SELECT)',     status: 'loading' },
+    { name: 'DB — resumes (SELECT)',  status: 'loading' },
+    { name: 'DB — settings (SELECT)', status: 'loading' },
+    { name: 'DB — users (SELECT)',    status: 'loading' },
+    { name: 'Env — SUPABASE_URL',     status: 'loading' },
+    { name: 'Env — APP_URL',          status: 'loading' },
+  ])
+  const [runAt, setRunAt] = useState<string>('')
+  const [running, setRunning] = useState(false)
 
-NOTIFY pgrst, 'reload schema';
-SQL
+  const runAll = async () => {
+    setRunning(true)
+    setRunAt(new Date().toLocaleTimeString('ru-RU'))
 
-echo ""
-echo "╔══════════════════════════════════════════════════════════════════╗"
-echo "║  ⚠️  ВЫПОЛНИ В Supabase → SQL Editor:                           ║"
-echo "╚══════════════════════════════════════════════════════════════════╝"
-cat /tmp/fix_rls.sql
-echo ""
-echo "SQL сохранён в /tmp/fix_rls.sql"
+    // Reset
+    setChecks(c => c.map(x => ({ ...x, status: 'loading', detail: undefined, latency: undefined })))
+
+    const results = await Promise.all([
+      runCheck('Auth — getSession', async () => {
+        const { data, error } = await supabase.auth.getSession()
+        if (error) throw new Error(error.message)
+        return data.session ? `Залогинен: ${data.session.user.email}` : 'Анонимный пользователь'
+      }),
+      runCheck('DB — jobs (SELECT)', async () => {
+        const { count, error } = await supabase.from('jobs').select('id', { count: 'exact', head: true })
+        if (error) throw new Error(error.message)
+        return `${count ?? 0} записей`
+      }),
+      runCheck('DB — resumes (SELECT)', async () => {
+        const { count, error } = await supabase.from('resumes').select('id', { count: 'exact', head: true })
+        if (error) throw new Error(error.message)
+        return `${count ?? 0} записей`
+      }),
+      runCheck('DB — settings (SELECT)', async () => {
+        const { data, error } = await supabase.from('settings').select('*').eq('id', 1).single()
+        if (error) throw new Error(error.message)
+        return `header=${data.header_enabled} tg=${data.telegram_autopost_enabled}`
+      }),
+      runCheck('DB — users (SELECT)', async () => {
+        const { data: auth } = await supabase.auth.getSession()
+        if (!auth.session) return 'Пропущено (не авторизован)'
+        const { data, error } = await supabase.from('users').select('role').eq('id', auth.session.user.id).single()
+        if (error) throw new Error(error.message)
+        return `role = ${data.role}`
+      }),
+      runCheck('Env — SUPABASE_URL', async () => {
+        const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+        if (!url) throw new Error('NEXT_PUBLIC_SUPABASE_URL не задан')
+        return url
+      }),
+      runCheck('Env — APP_URL', async () => {
+        const url = process.env.NEXT_PUBLIC_APP_URL
+        if (!url) throw new Error('NEXT_PUBLIC_APP_URL не задан')
+        return url
+      }),
+    ])
+
+    setChecks(results)
+    setRunning(false)
+  }
+
+  useEffect(() => { runAll() }, [])
+
+  const allOk    = checks.every(c => c.status === 'ok')
+  const hasError = checks.some(c => c.status === 'error')
+  const isLoading = checks.some(c => c.status === 'loading')
+
+  return (
+    <div className="min-h-screen bg-[#0F172A] text-white px-4 py-12 font-mono">
+      <div className="max-w-2xl mx-auto">
+
+        {/* Header */}
+        <div className="flex items-center justify-between mb-8">
+          <div>
+            <div className="flex items-center gap-3 mb-1">
+              <div className={`w-3 h-3 rounded-full ${isLoading ? 'bg-amber-400 animate-pulse' : allOk ? 'bg-green-400' : 'bg-red-500'}`}/>
+              <h1 className="text-lg font-bold">System Status</h1>
+              <span className="text-xs text-[#475569] bg-[#1E293B] px-2 py-0.5 rounded">ВакансияРФ</span>
+            </div>
+            {runAt && <p className="text-xs text-[#475569]">Проверка в {runAt}</p>}
+          </div>
+          <button
+            onClick={runAll}
+            disabled={running}
+            className="flex items-center gap-2 h-8 px-4 bg-[#1E293B] hover:bg-[#334155] border border-[#334155] text-xs rounded-lg transition-colors disabled:opacity-50"
+          >
+            {running ? (
+              <span className="w-3 h-3 border border-[#475569] border-t-white rounded-full animate-spin"/>
+            ) : '↻'} Повторить
+          </button>
+        </div>
+
+        {/* Overall status */}
+        <div className={`rounded-xl border p-4 mb-6 text-sm ${
+          isLoading ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' :
+          allOk     ? 'bg-green-500/10 border-green-500/30 text-green-400' :
+                      'bg-red-500/10 border-red-500/30 text-red-400'
+        }`}>
+          {isLoading ? '⏳ Выполняется проверка...' :
+           allOk     ? '✅ Все системы работают нормально' :
+                       `⛔ Обнаружены проблемы: ${checks.filter(c=>c.status==='error').length} из ${checks.length}`}
+        </div>
+
+        {/* Checks */}
+        <div className="space-y-2">
+          {checks.map((c) => (
+            <div key={c.name} className="bg-[#1E293B] border border-[#334155] rounded-lg px-4 py-3 flex items-center gap-3">
+              <div className="shrink-0 w-5 text-center">
+                {c.status === 'loading' && <span className="inline-block w-3 h-3 border border-[#475569] border-t-amber-400 rounded-full animate-spin"/>}
+                {c.status === 'ok'      && <span className="text-green-400">✓</span>}
+                {c.status === 'error'   && <span className="text-red-500">✗</span>}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-[#E2E8F0]">{c.name}</p>
+                {c.detail && (
+                  <p className={`text-xs mt-0.5 truncate ${c.status === 'error' ? 'text-red-400' : 'text-[#64748B]'}`}>
+                    {c.detail}
+                  </p>
+                )}
+              </div>
+              {c.latency !== undefined && (
+                <span className={`shrink-0 text-xs px-2 py-0.5 rounded ${
+                  c.latency < 300  ? 'text-green-400 bg-green-400/10' :
+                  c.latency < 1000 ? 'text-amber-400 bg-amber-400/10' :
+                                     'text-red-400 bg-red-400/10'
+                }`}>
+                  {c.latency}ms
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* Env block */}
+        <div className="mt-6 bg-[#1E293B] border border-[#334155] rounded-xl p-4 text-xs text-[#475569] space-y-1">
+          <p className="text-[#64748B] font-semibold mb-2">Переменные окружения</p>
+          <p>SUPABASE_URL: <span className="text-[#94A3B8]">{process.env.NEXT_PUBLIC_SUPABASE_URL ? '✓ задан' : '✗ не задан'}</span></p>
+          <p>SUPABASE_ANON_KEY: <span className="text-[#94A3B8]">{process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ? '✓ задан' : '✗ не задан'}</span></p>
+          <p>APP_URL: <span className="text-[#94A3B8]">{process.env.NEXT_PUBLIC_APP_URL || '✗ не задан'}</span></p>
+        </div>
+
+        <p className="text-center text-[#334155] text-xs mt-8">
+          Секретная страница диагностики · /status
+        </p>
+      </div>
+    </div>
+  )
+}
+EOF
+
+echo "✅ app/status/page.tsx — страница диагностики"
+
+# ─────────────────────────────────────────────────────────────────
+# 3. Candidate dashboard — тот же паттерн с таймаутом и ошибками
+# ─────────────────────────────────────────────────────────────────
+cat > app/dashboard/candidate/page.tsx << 'EOF'
+'use client'
+import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+import { Plus, FileText, LogOut, Eye } from 'lucide-react'
+import { supabase } from '@/lib/supabaseClient'
+
+function fmtDate(s: string) {
+  return new Date(s).toLocaleDateString('ru-RU', { day:'numeric', month:'short', year:'numeric' })
+}
+
+export default function CandidateDashboard() {
+  const [user, setUser]     = useState<any>(null)
+  const [resumes, setResumes] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError]   = useState('')
+  const router = useRouter()
+
+  useEffect(() => {
+    let cancelled = false
+    const timeout = setTimeout(() => {
+      if (!cancelled) { setError('Supabase не отвечает. Проверьте подключение.'); setLoading(false) }
+    }, 8000)
+
+    async function init() {
+      try {
+        const { data: authData } = await supabase.auth.getUser()
+        if (!authData.user) { router.push('/auth/login'); return }
+
+        const { data: u, error: uErr } = await supabase
+          .from('users').select('*').eq('id', authData.user.id).single()
+
+        if (uErr || !u) {
+          setError('Не удалось загрузить профиль: ' + (uErr?.message || 'нет данных'))
+          setLoading(false)
+          return
+        }
+
+        // Если роль не candidate — редирект на правильный дашборд
+        if (u.role !== 'candidate') {
+          router.push(u.role === 'admin' ? '/dashboard/admin' : u.role === 'hr' ? '/dashboard/hr' : '/')
+          return
+        }
+
+        if (cancelled) return
+        setUser(u)
+
+        const { data: myResumes, error: rErr } = await supabase
+          .from('resumes')
+          .select('*')
+          .eq('user_id', authData.user.id)
+          .order('created_at', { ascending: false })
+
+        if (rErr) setError('Ошибка загрузки резюме: ' + rErr.message)
+        else setResumes(myResumes || [])
+      } catch (e: any) {
+        setError('Ошибка: ' + e.message)
+      } finally {
+        if (!cancelled) { clearTimeout(timeout); setLoading(false) }
+      }
+    }
+
+    init()
+    return () => { cancelled = true; clearTimeout(timeout) }
+  }, [router])
+
+  const handleLogout = async () => { await supabase.auth.signOut(); router.push('/') }
+
+  if (loading) return (
+    <div className="flex flex-col items-center justify-center py-32 gap-4">
+      <div className="w-8 h-8 border-2 border-[#E5E7EB] border-t-[#7C3AED] rounded-full animate-spin"/>
+      <p className="text-sm text-[#94A3B8]">Загрузка кабинета...</p>
+    </div>
+  )
+
+  if (error) return (
+    <div className="max-w-lg mx-auto px-4 py-20 text-center">
+      <div className="text-4xl mb-4">⚠️</div>
+      <h2 className="text-lg font-bold text-[#0F172A] mb-2">Ошибка загрузки</h2>
+      <p className="text-sm text-[#64748B] mb-6">{error}</p>
+      <div className="flex gap-3 justify-center">
+        <button onClick={() => window.location.reload()}
+          className="h-9 px-4 bg-[#7C3AED] text-white text-sm rounded-[8px] hover:bg-[#6D28D9]">
+          Обновить
+        </button>
+        <Link href="/status"
+          className="h-9 px-4 border border-[#E5E7EB] text-sm rounded-[8px] text-[#64748B] hover:bg-[#F8FAFC] flex items-center">
+          Проверить статус
+        </Link>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="max-w-5xl mx-auto px-4 py-10">
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h1 className="text-2xl font-bold text-[#0F172A]">Кабинет соискателя</h1>
+          <p className="text-sm text-[#64748B] mt-0.5">{user?.name || user?.email}</p>
+        </div>
+        <div className="flex gap-2">
+          <Link href="/dashboard/candidate/create-resume"
+            className="flex items-center gap-2 h-10 px-4 bg-[#10B981] hover:bg-[#059669] text-white text-sm font-medium rounded-[10px] transition-colors">
+            <Plus size={15}/>Создать резюме
+          </Link>
+          <button onClick={handleLogout}
+            className="flex items-center gap-2 h-10 px-4 border border-[#E5E7EB] text-[#64748B] hover:bg-[#F8FAFC] text-sm rounded-[10px]">
+            <LogOut size={14}/>Выйти
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 mb-8">
+        {[
+          ['Всего резюме',  resumes.length,                          'text-[#7C3AED]'],
+          ['Опубликовано',  resumes.filter(r => r.visible).length,  'text-[#10B981]'],
+        ].map(([l, v, c]) => (
+          <div key={String(l)} className="bg-white rounded-[14px] border border-[#E5E7EB] p-5">
+            <p className={`text-2xl font-bold ${c}`}>{v}</p>
+            <p className="text-xs text-[#64748B] mt-1">{l}</p>
+          </div>
+        ))}
+      </div>
+
+      {resumes.length === 0 ? (
+        <div className="bg-white rounded-[20px] border border-dashed border-[#E5E7EB] p-16 text-center">
+          <FileText size={28} className="text-[#94A3B8] mx-auto mb-3"/>
+          <h3 className="font-semibold text-[#0F172A] mb-1">Нет резюме</h3>
+          <p className="text-sm text-[#64748B] mb-5">Создайте своё первое резюме</p>
+          <Link href="/dashboard/candidate/create-resume"
+            className="inline-flex items-center gap-2 h-10 px-5 bg-[#10B981] hover:bg-[#059669] text-white text-sm font-medium rounded-[10px] transition-colors">
+            <Plus size={14}/>Создать
+          </Link>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {resumes.map(r => (
+            <div key={r.id} className="bg-white rounded-[14px] border border-[#E5E7EB] p-4 flex items-center justify-between gap-4">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <p className="font-medium text-[#0F172A] truncate">{r.title || r.name}</p>
+                  <span className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${r.visible ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'}`}>
+                    {r.visible ? 'Опубликовано' : 'На модерации'}
+                  </span>
+                </div>
+                <p className="text-xs text-[#64748B]">{r.name} · {fmtDate(r.created_at)}</p>
+              </div>
+              <Link href={`/resumes/${r.id}`}
+                className="w-8 h-8 rounded-[6px] border border-[#E5E7EB] flex items-center justify-center text-[#64748B] hover:text-[#7C3AED] hover:border-[#7C3AED] transition-colors">
+                <Eye size={13}/>
+              </Link>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+EOF
+
+echo "✅ app/dashboard/candidate/page.tsx — таймаут + правильный роль-редирект"
 
 rm -rf .next
 echo ""
-echo "✅ Готово. Выполни SQL выше → затем npm run dev"
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  ✅ Готово!                                                  ║"
+echo "║                                                              ║"
+echo "║  Страница диагностики: http://localhost:3000/status         ║"
+echo "║  (покажет все проверки Supabase в реальном времени)         ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+echo ""
+echo "npm run dev"
