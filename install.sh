@@ -1,10 +1,11 @@
 #!/bin/bash
-# cd job-marketplace && bash ../fix-status-users.sh
+# cd job-marketplace && bash ../fix-status-admin-only.sh
 set -e
 
 cat > app/status/page.tsx << 'ENDOFFILE'
 'use client'
 import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 
 type Status = 'ok' | 'error' | 'loading' | 'timeout'
@@ -38,10 +39,50 @@ const INITIAL: Check[] = [
 ]
 
 export default function StatusPage() {
-  const [checks, setChecks]   = useState<Check[]>(INITIAL)
-  const [runAt, setRunAt]     = useState('')
-  const [running, setRunning] = useState(false)
+  const router = useRouter()
+  const [checks, setChecks]         = useState<Check[]>(INITIAL)
+  const [runAt, setRunAt]           = useState('')
+  const [running, setRunning]       = useState(false)
+  const [authState, setAuthState]   = useState<'checking' | 'allowed' | 'denied'>('checking')
+  const [accessMode, setAccessMode] = useState<'admin' | 'hidden' | null>(null)
 
+  // ── Проверка доступа ───────────────────────────────────────────
+  useEffect(() => {
+    const checkAccess = async () => {
+      // 1. localStorage — быстрый путь, не требует авторизации
+      try {
+        if (localStorage.getItem('hiddenOptions') === 'yess') {
+          setAccessMode('hidden')
+          setAuthState('allowed')
+          return
+        }
+      } catch (_) {
+        // localStorage недоступен (SSR / приватный режим) — идём дальше
+      }
+
+      // 2. Проверяем роль admin через Supabase
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) { setAuthState('denied'); return }
+
+      const { data } = await supabase
+        .from('users').select('role').eq('id', session.user.id).maybeSingle()
+
+      if (data?.role === 'admin') {
+        setAccessMode('admin')
+        setAuthState('allowed')
+      } else {
+        setAuthState('denied')
+      }
+    }
+    checkAccess()
+  }, [])
+
+  // Редирект если нет доступа
+  useEffect(() => {
+    if (authState === 'denied') router.replace('/')
+  }, [authState, router])
+
+  // ── Диагностика ────────────────────────────────────────────────
   const updateCheck = (name: string, result: Check) =>
     setChecks(prev => prev.map(c => c.name === name ? result : c))
 
@@ -78,7 +119,6 @@ export default function StatusPage() {
       {
         name: 'DB — settings (SELECT)',
         fn: async () => {
-          // maybeSingle — не падает если 0 строк
           const { data, error } = await supabase
             .from('settings').select('header_enabled,telegram_autopost_enabled').eq('id', 1).maybeSingle()
           if (error) throw new Error(error.message)
@@ -91,7 +131,6 @@ export default function StatusPage() {
         fn: async () => {
           const { data: auth } = await supabase.auth.getSession()
           if (!auth.session) return 'Пропущено (не авторизован)'
-          // maybeSingle вместо single — не бросает ошибку если 0 строк
           const { data, error } = await supabase
             .from('users').select('role').eq('id', auth.session.user.id).maybeSingle()
           if (error) throw new Error(error.message)
@@ -125,9 +164,31 @@ export default function StatusPage() {
     setRunning(false)
   }
 
-  useEffect(() => { runAll() }, [])
+  useEffect(() => {
+    if (authState === 'allowed') runAll()
+  }, [authState])
 
-  const allOk    = checks.every(c => c.status === 'ok')
+  // ── Экраны ожидания / отказа ───────────────────────────────────
+  if (authState === 'checking') return (
+    <div className="min-h-screen bg-[#0F172A] flex items-center justify-center">
+      <div className="text-center">
+        <div className="w-8 h-8 border-2 border-[#334155] border-t-[#7C3AED] rounded-full animate-spin mx-auto mb-3"/>
+        <p className="text-[#475569] text-sm font-mono">Проверка доступа...</p>
+      </div>
+    </div>
+  )
+
+  if (authState === 'denied') return (
+    <div className="min-h-screen bg-[#0F172A] flex items-center justify-center">
+      <div className="text-center">
+        <p className="text-red-400 text-sm font-mono">⛔ Доступ запрещён</p>
+        <p className="text-[#475569] text-xs mt-1">Перенаправление...</p>
+      </div>
+    </div>
+  )
+
+  // ── Основной UI ────────────────────────────────────────────────
+  const allOk     = checks.every(c => c.status === 'ok')
   const isLoading = checks.some(c => c.status === 'loading')
 
   const statusIcon = (s: Status) => {
@@ -150,10 +211,16 @@ export default function StatusPage() {
 
         <div className="flex items-center justify-between mb-8">
           <div>
-            <div className="flex items-center gap-3 mb-1">
+            <div className="flex items-center gap-3 mb-1 flex-wrap">
               <div className={`w-3 h-3 rounded-full transition-colors ${isLoading ? 'bg-amber-400 animate-pulse' : allOk ? 'bg-green-400' : 'bg-red-500'}`}/>
               <h1 className="text-lg font-bold tracking-tight">System Status</h1>
               <span className="text-xs text-[#475569] bg-[#1E293B] px-2 py-0.5 rounded border border-[#334155]">ВакансияРФ</span>
+              {accessMode === 'admin' && (
+                <span className="text-xs text-[#7C3AED] bg-[#7C3AED]/10 px-2 py-0.5 rounded border border-[#7C3AED]/20">admin</span>
+              )}
+              {accessMode === 'hidden' && (
+                <span className="text-xs text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded border border-amber-400/20">hidden access</span>
+              )}
             </div>
             {runAt && <p className="text-xs text-[#475569] pl-6">Проверка в {runAt}</p>}
           </div>
@@ -221,7 +288,7 @@ export default function StatusPage() {
           </p>
         </div>
 
-        <p className="text-center text-[#1E293B] text-xs mt-8 select-none">/status · только для разработчиков</p>
+        <p className="text-center text-[#1E293B] text-xs mt-8 select-none">/status · только для администраторов</p>
       </div>
     </div>
   )
@@ -229,5 +296,5 @@ export default function StatusPage() {
 ENDOFFILE
 
 rm -rf .next
-echo "✅ app/status/page.tsx — исправлен .maybeSingle()"
+echo "✅ /status — доступ: admin ИЛИ localStorage.hiddenOptions === 'yess'"
 echo "npm run dev → http://localhost:3000/status"
