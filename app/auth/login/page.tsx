@@ -42,6 +42,9 @@ export default function LoginPage() {
               <label className="text-sm font-medium text-[#0F172A]">Пароль</label>
               <input type="password" placeholder="••••••••" {...register('password')} className="h-10 w-full rounded-[10px] border border-[#E5E7EB] px-3 text-sm placeholder:text-[#94A3B8] focus:outline-none focus:border-[#7C3AED] focus:ring-2 focus:ring-[#7C3AED]/10"/>
               {errors.password&&<p className="text-xs text-[#EF4444]">{errors.password.message}</p>}
+              <div className="flex justify-end">
+                <Link href="/auth/forgot-password" className="text-xs text-[#7C3AED] hover:underline">Забыли пароль?</Link>
+              </div>
             </div>
             {error&&<div className="bg-[#FEF2F2] border border-[#FECACA] rounded-[8px] px-3 py-2 text-xs text-[#EF4444]">{error}</div>}
             <button type="submit" disabled={isSubmitting} className="w-full h-10 bg-[#7C3AED] hover:bg-[#6D28D9] text-white font-medium rounded-[10px] text-sm flex items-center justify-center gap-2 disabled:opacity-50 mt-2 transition-colors">

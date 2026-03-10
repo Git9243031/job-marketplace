@@ -1,568 +1,463 @@
 #!/bin/bash
-# cd job-marketplace && bash ../fix-hr-redirect-health.sh
+# cd job-marketplace && bash ../fix-apply-and-password.sh
 set -e
 
-echo "🔧 Фикс: HR редирект + бесконечный лоадер + health-check страница..."
+echo "🔧 Apply block + восстановление пароля..."
 
 # ─────────────────────────────────────────────────────────────────
-# 1. HR DASHBOARD — проблема в getMyJobs, он делает запрос
-#    с фильтром visible=true через RLS, а HR-у нужны ВСЕ его вакансии
-#    включая невидимые. Если запрос падает — loading зависает навсегда.
-#    Добавляем timeout + fallback + исправляем запрос своих вакансий.
+# 1. app/jobs/[id]/page.tsx — Antigravity apply block
 # ─────────────────────────────────────────────────────────────────
-cat > app/dashboard/hr/page.tsx << 'EOF'
+mkdir -p "app/jobs/[id]"
+
+cat > "app/jobs/[id]/page.tsx" << 'ENDOFFILE'
 'use client'
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useParams } from 'next/navigation'
 import Link from 'next/link'
-import { Plus, Briefcase, LogOut, Eye } from 'lucide-react'
+import { MapPin, ArrowLeft, Building2, Clock, Briefcase, DollarSign, Hash, Send, ExternalLink } from 'lucide-react'
 import { supabase } from '@/lib/supabaseClient'
+import { cn } from '@/lib/utils'
 
-const SPHERE_RU: Record<string,string> = {
-  it:'IT', design:'Дизайн', marketing:'Маркетинг',
-  finance:'Финансы', hr:'HR', sales:'Продажи',
-  legal:'Юриспруденция', other:'Другое',
-}
+const FORMAT_RU:   Record<string,string> = { remote:'Удалённо', office:'Офис', hybrid:'Гибрид' }
+const LEVEL_RU:    Record<string,string> = { junior:'Junior', middle:'Middle', senior:'Senior', lead:'Lead', any:'Любой' }
+const TYPE_RU:     Record<string,string> = { 'full-time':'Полная', 'part-time':'Частичная', contract:'Контракт', freelance:'Фриланс', internship:'Стажировка' }
+const CONTRACT_RU: Record<string,string> = { trud:'Трудовой', gph:'ГПХ', ip:'С ИП', selfemployed:'Самозанятый' }
+const SPHERE_RU:   Record<string,string> = { it:'IT', design:'Дизайн', marketing:'Маркетинг', finance:'Финансы', hr:'HR', sales:'Продажи', legal:'Юриспруденция', other:'Другое' }
+const FC: Record<string,string> = { remote:'bg-emerald-50 text-emerald-700 border-emerald-100', office:'bg-blue-50 text-blue-700 border-blue-100', hybrid:'bg-amber-50 text-amber-700 border-amber-100' }
+const LC: Record<string,string> = { junior:'bg-green-50 text-green-700 border-green-100', middle:'bg-blue-50 text-blue-700 border-blue-100', senior:'bg-purple-50 text-purple-700 border-purple-100', lead:'bg-amber-50 text-amber-700 border-amber-100' }
 
 function fmtSalary(min?: number, max?: number) {
-  if (!min && !max) return 'ЗП не указана'
-  const f = (n: number) => n >= 1000 ? `${Math.round(n/1000)}к` : String(n)
-  if (min && max) return `${f(min)}–${f(max)} ₽`
+  if (!min && !max) return null
+  const f = (n: number) => n >= 1000 ? `${Math.round(n / 1000)}к` : String(n)
+  if (min && max) return `${f(min)} — ${f(max)} ₽`
   if (min) return `от ${f(min)} ₽`
   return `до ${f(max!)} ₽`
 }
 
-function fmtDate(s: string) {
-  return new Date(s).toLocaleDateString('ru-RU', { day:'numeric', month:'short', year:'numeric' })
+function timeAgo(s: string) {
+  const d = Math.floor((Date.now() - new Date(s).getTime()) / 86400000)
+  if (d === 0) return 'сегодня'
+  if (d === 1) return 'вчера'
+  if (d < 7)  return `${d} дн. назад`
+  return `${Math.floor(d / 7)} нед. назад`
 }
 
-export default function HRDashboard() {
-  const [user, setUser]   = useState<any>(null)
-  const [jobs, setJobs]   = useState<any[]>([])
+function ApplyBlock({ job }: { job: any }) {
+  const salary      = fmtSalary(job.salary_min, job.salary_max)
+  const isTg        = job.contact?.startsWith('@')
+  const contactHref = isTg ? `https://t.me/${job.contact.slice(1)}` : job.contact ? `mailto:${job.contact}` : null
+
+  return (
+    <>
+      <style>{`
+        @keyframes levitate  { 0%,100%{transform:translateY(0px) rotate(-1deg)} 50%{transform:translateY(-8px) rotate(1deg)} }
+        @keyframes levitate2 { 0%,100%{transform:translateY(0px) rotate(2deg)}  50%{transform:translateY(-6px) rotate(-1deg)} }
+        @keyframes orb-pulse { 0%,100%{transform:scale(1);opacity:0.4} 50%{transform:scale(1.15);opacity:0.6} }
+        .levitate  { animation: levitate  3.2s ease-in-out infinite; }
+        .levitate2 { animation: levitate2 2.8s ease-in-out infinite; }
+        .orb-pulse { animation: orb-pulse 4s   ease-in-out infinite; }
+      `}</style>
+
+      <div className="relative overflow-hidden rounded-[28px] bg-white border border-[#E5E7EB] shadow-[0_20px_60px_-10px_rgba(124,58,237,0.18)]">
+        <div className="absolute -top-8 -right-8 w-28 h-28 rounded-full bg-gradient-to-br from-[#A78BFA] to-[#7C3AED] orb-pulse pointer-events-none" style={{filter:'blur(2px)',opacity:0.3}}/>
+        <div className="absolute -bottom-6 -left-6 w-20 h-20 rounded-full bg-gradient-to-br from-[#10B981] to-[#059669] orb-pulse pointer-events-none" style={{filter:'blur(3px)',opacity:0.2,animationDelay:'1.5s'}}/>
+        <div className="relative p-6">
+
+          <div className="flex justify-center mb-5">
+            <div className="levitate inline-flex items-center gap-2.5 bg-[#F8FAFC] border border-[#E5E7EB] rounded-2xl px-4 py-2.5 shadow-[0_8px_24px_rgba(0,0,0,0.08)]">
+              <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[#7C3AED] to-[#A78BFA] flex items-center justify-center text-white text-sm font-bold shrink-0">
+                {job.company.charAt(0)}
+              </div>
+              <div>
+                <p className="text-sm font-bold text-[#0F172A] leading-none">{job.company}</p>
+                {job.location && <p className="text-[11px] text-[#94A3B8] mt-0.5">{job.location}</p>}
+              </div>
+            </div>
+          </div>
+
+          {salary && (
+            <div className="levitate2 text-center mb-5">
+              <span className="inline-block bg-gradient-to-r from-[#059669] to-[#10B981] text-white text-lg font-black px-5 py-2 rounded-2xl shadow-[0_6px_20px_rgba(16,185,129,0.35)] tracking-tight">{salary}</span>
+              <p className="text-[11px] text-[#94A3B8] mt-1.5 font-medium">в месяц</p>
+            </div>
+          )}
+
+          <div className="border-t border-dashed border-[#E5E7EB] mb-5"/>
+
+          <div className="space-y-2.5">
+            {contactHref ? (
+              <a href={contactHref} target="_blank" rel="noopener noreferrer"
+                className="group flex items-center justify-between w-full px-5 py-3.5 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#6D28D9] text-white font-bold text-sm shadow-[0_8px_24px_rgba(124,58,237,0.35)] hover:shadow-[0_12px_32px_rgba(124,58,237,0.45)] hover:-translate-y-0.5 transition-all duration-200">
+                <span className="flex items-center gap-2.5">
+                  {isTg ? <Send size={16} className="shrink-0"/> : <ExternalLink size={16} className="shrink-0"/>}
+                  {isTg ? 'Написать в Telegram' : 'Написать на email'}
+                </span>
+                <span className="text-white/60 group-hover:text-white transition-colors text-lg leading-none">→</span>
+              </a>
+            ) : (
+              <div className="flex items-center justify-center gap-2 w-full px-5 py-3.5 rounded-2xl bg-[#F1F5F9] text-[#94A3B8] text-sm font-medium">
+                Контакт не указан
+              </div>
+            )}
+
+            <a href="https://t.me/joba_box" target="_blank" rel="noopener noreferrer"
+              className="group flex items-center justify-between w-full px-5 py-3.5 rounded-2xl bg-[#EFF6FF] border border-[#BFDBFE] text-[#2563EB] font-semibold text-sm hover:bg-[#DBEAFE] hover:border-[#93C5FD] hover:-translate-y-0.5 transition-all duration-200">
+              <span className="flex items-center gap-2.5">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="shrink-0">
+                  <path d="M22 2L11 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                Все вакансии в канале
+              </span>
+              <span className="text-[#93C5FD] group-hover:text-[#2563EB] transition-colors font-bold">@joba_box</span>
+            </a>
+          </div>
+
+          <p className="text-center text-[11px] text-[#CBD5E1] mt-4 flex items-center justify-center gap-1">
+            <Clock size={11}/>Опубликовано {timeAgo(job.created_at)}
+          </p>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-5 shadow-[0_4px_20px_rgba(0,0,0,0.06)] hover:shadow-[0_8px_30px_rgba(0,0,0,0.09)] transition-shadow duration-300">
+        <p className="text-[10px] font-bold text-[#94A3B8] uppercase tracking-widest mb-4">О вакансии</p>
+        <div className="space-y-3">
+          {job.format && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[#94A3B8]">Формат</span>
+              <span className={cn('text-xs font-semibold px-2.5 py-1 rounded-full border', FC[job.format] || 'bg-gray-50 text-gray-600')}>{FORMAT_RU[job.format]}</span>
+            </div>
+          )}
+          {job.experience_level && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[#94A3B8]">Уровень</span>
+              <span className={cn('text-xs font-semibold px-2.5 py-1 rounded-full border', LC[job.experience_level] || 'bg-gray-50 text-gray-600')}>{LEVEL_RU[job.experience_level]}</span>
+            </div>
+          )}
+          {job.job_type && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[#94A3B8]">Занятость</span>
+              <span className="text-xs font-semibold text-[#0F172A]">{TYPE_RU[job.job_type]}</span>
+            </div>
+          )}
+          {job.contract_type && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[#94A3B8]">Договор</span>
+              <span className="text-xs font-semibold text-[#7C3AED]">{CONTRACT_RU[job.contract_type]}</span>
+            </div>
+          )}
+          {job.location && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[#94A3B8]">Город</span>
+              <span className="text-xs font-semibold text-[#0F172A] flex items-center gap-1">
+                <MapPin size={11} className="text-[#94A3B8]"/>{job.location}
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  )
+}
+
+export default function JobDetailPage() {
+  const { id } = useParams() as { id: string }
+  const [job, setJob]         = useState<any>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const router = useRouter()
 
   useEffect(() => {
-    let cancelled = false
-
-    // Таймаут — если Supabase не ответил за 8 сек, показываем ошибку
-    const timeout = setTimeout(() => {
-      if (!cancelled) {
-        setError('Supabase не отвечает. Проверьте подключение.')
-        setLoading(false)
-      }
-    }, 8000)
-
-    async function init() {
-      try {
-        const { data: authData } = await supabase.auth.getUser()
-        if (!authData.user) { router.push('/auth/login'); return }
-
-        // Загружаем профиль
-        const { data: u, error: uErr } = await supabase
-          .from('users').select('*').eq('id', authData.user.id).single()
-
-        if (uErr || !u) {
-          setError('Не удалось загрузить профиль: ' + (uErr?.message || 'нет данных'))
-          setLoading(false)
-          return
-        }
-
-        // Проверяем роль
-        if (u.role !== 'hr' && u.role !== 'admin') {
-          router.push(u.role === 'candidate' ? '/dashboard/candidate' : '/')
-          return
-        }
-
-        if (cancelled) return
-        setUser(u)
-
-        // Загружаем ВСЕ вакансии HR-а (включая невидимые)
-        // Важно: запрос идёт с auth токеном, RLS политика jobs_select_own разрешает
-        const { data: myJobs, error: jErr } = await supabase
-          .from('jobs')
-          .select('*')
-          .eq('created_by', authData.user.id)
-          .order('created_at', { ascending: false })
-
-        if (jErr) {
-          setError('Ошибка загрузки вакансий: ' + jErr.message)
-        } else {
-          setJobs(myJobs || [])
-        }
-      } catch (e: any) {
-        setError('Ошибка: ' + e.message)
-      } finally {
-        if (!cancelled) {
-          clearTimeout(timeout)
-          setLoading(false)
-        }
-      }
-    }
-
-    init()
-    return () => { cancelled = true; clearTimeout(timeout) }
-  }, [router])
-
-  const handleLogout = async () => { await supabase.auth.signOut(); router.push('/') }
+    if (!id) return
+    supabase.from('jobs').select('*').eq('id', id).single()
+      .then(({ data }) => { setJob(data); setLoading(false) })
+  }, [id])
 
   if (loading) return (
-    <div className="flex flex-col items-center justify-center py-32 gap-4">
+    <div className="flex justify-center py-32">
       <div className="w-8 h-8 border-2 border-[#E5E7EB] border-t-[#7C3AED] rounded-full animate-spin"/>
-      <p className="text-sm text-[#94A3B8]">Загрузка кабинета...</p>
     </div>
   )
 
-  if (error) return (
-    <div className="max-w-lg mx-auto px-4 py-20 text-center">
-      <div className="text-4xl mb-4">⚠️</div>
-      <h2 className="text-lg font-bold text-[#0F172A] mb-2">Ошибка загрузки</h2>
-      <p className="text-sm text-[#64748B] mb-6">{error}</p>
-      <div className="flex gap-3 justify-center">
-        <button onClick={() => window.location.reload()}
-          className="h-9 px-4 bg-[#7C3AED] text-white text-sm rounded-[8px] hover:bg-[#6D28D9]">
-          Обновить
-        </button>
-        <Link href="/status"
-          className="h-9 px-4 border border-[#E5E7EB] text-sm rounded-[8px] text-[#64748B] hover:bg-[#F8FAFC] flex items-center">
-          Проверить статус
-        </Link>
-      </div>
+  if (!job) return (
+    <div className="max-w-3xl mx-auto px-4 py-20 text-center">
+      <h1 className="text-2xl font-bold text-[#0F172A] mb-2">Вакансия не найдена</h1>
+      <p className="text-sm text-[#64748B] mb-4">Возможно, она была удалена или ещё не опубликована.</p>
+      <Link href="/" className="text-[#7C3AED] hover:underline text-sm">← Вернуться к вакансиям</Link>
     </div>
   )
+
+  const salary = fmtSalary(job.salary_min, job.salary_max)
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-10">
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-2xl font-bold text-[#0F172A]">Кабинет HR</h1>
-          <p className="text-sm text-[#64748B] mt-0.5">{user?.name || user?.email}</p>
-        </div>
-        <div className="flex gap-2">
-          <Link href="/dashboard/hr/create-job"
-            className="flex items-center gap-2 h-10 px-4 bg-[#10B981] hover:bg-[#059669] text-white text-sm font-medium rounded-[10px] transition-colors">
-            <Plus size={15}/>Создать вакансию
-          </Link>
-          <button onClick={handleLogout}
-            className="flex items-center gap-2 h-10 px-4 border border-[#E5E7EB] text-[#64748B] hover:bg-[#F8FAFC] text-sm rounded-[10px]">
-            <LogOut size={14}/>Выйти
-          </button>
-        </div>
-      </div>
-
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-4 mb-8">
-        {[
-          ['Всего вакансий',   jobs.length,                          'text-[#7C3AED]'],
-          ['Опубликовано',     jobs.filter(j => j.visible).length,   'text-[#10B981]'],
-          ['На модерации',     jobs.filter(j => !j.visible).length,  'text-amber-600'],
-        ].map(([l, v, c]) => (
-          <div key={String(l)} className="bg-white rounded-[14px] border border-[#E5E7EB] p-5">
-            <p className={`text-2xl font-bold ${c}`}>{v}</p>
-            <p className="text-xs text-[#64748B] mt-1">{l}</p>
-          </div>
-        ))}
-      </div>
-
-      {jobs.length === 0 ? (
-        <div className="bg-white rounded-[20px] border border-dashed border-[#E5E7EB] p-16 text-center">
-          <Briefcase size={28} className="text-[#94A3B8] mx-auto mb-3"/>
-          <h3 className="font-semibold text-[#0F172A] mb-1">Нет вакансий</h3>
-          <p className="text-sm text-[#64748B] mb-5">Создайте первую вакансию</p>
-          <Link href="/dashboard/hr/create-job"
-            className="inline-flex items-center gap-2 h-10 px-5 bg-[#10B981] hover:bg-[#059669] text-white text-sm font-medium rounded-[10px] transition-colors">
-            <Plus size={14}/>Создать
-          </Link>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {jobs.map(job => (
-            <div key={job.id} className="bg-white rounded-[14px] border border-[#E5E7EB] p-4 flex items-center justify-between gap-4">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 mb-0.5 flex-wrap">
-                  <p className="font-medium text-[#0F172A] truncate">{job.title}</p>
-                  <span className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${job.visible ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'}`}>
-                    {job.visible ? 'Опубликовано' : 'На модерации'}
-                  </span>
-                </div>
-                <p className="text-xs text-[#64748B]">
-                  {job.company}
-                  {job.sphere ? ` · ${SPHERE_RU[job.sphere] || job.sphere}` : ''}
-                  {' · '}{fmtSalary(job.salary_min, job.salary_max)}
-                  {' · '}{fmtDate(job.created_at)}
-                </p>
-              </div>
-              <Link href={`/jobs/${job.id}`}
-                className="w-8 h-8 rounded-[6px] border border-[#E5E7EB] flex items-center justify-center text-[#64748B] hover:text-[#7C3AED] hover:border-[#7C3AED] transition-colors">
-                <Eye size={13}/>
-              </Link>
+    <div className="bg-[#F8FAFC] min-h-screen">
+      <div className="max-w-4xl mx-auto px-4 py-8">
+        <Link href="/" className="inline-flex items-center gap-1.5 text-sm text-[#64748B] hover:text-[#0F172A] mb-6 transition-colors">
+          <ArrowLeft size={14}/>Назад к вакансиям
+        </Link>
+        <div className="grid lg:grid-cols-[1fr_300px] gap-6">
+          <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-7 shadow-sm">
+            <div className="flex gap-2 mb-4 flex-wrap">
+              {job.sphere && <span className="text-xs font-medium text-[#64748B] bg-[#F1F5F9] border border-[#E5E7EB] px-2.5 py-1 rounded-full">{SPHERE_RU[job.sphere] || job.sphere}</span>}
+              {job.experience_level && <span className={cn('text-xs font-medium px-2.5 py-1 rounded-full border', LC[job.experience_level] || 'bg-gray-50 text-gray-600 border-gray-100')}>{LEVEL_RU[job.experience_level]}</span>}
             </div>
-          ))}
+            <h1 className="text-2xl font-bold text-[#0F172A] mb-2 leading-tight">{job.title}</h1>
+            <div className="flex items-center gap-2 text-[#7C3AED] font-semibold mb-5"><Building2 size={15}/>{job.company}</div>
+            <div className="flex flex-wrap gap-2 mb-6">
+              {job.format && <span className={cn('flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border', FC[job.format] || 'bg-gray-50 text-gray-600 border-gray-100')}><MapPin size={13}/>{FORMAT_RU[job.format]}</span>}
+              {job.job_type && <span className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border border-[#E5E7EB] bg-[#F8FAFC] text-[#64748B]"><Briefcase size={13}/>{TYPE_RU[job.job_type]}</span>}
+              {job.contract_type && <span className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border border-[#DDD6FE] bg-[#EDE9FE] text-[#7C3AED]">{CONTRACT_RU[job.contract_type]}</span>}
+              {salary && <span className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border bg-[#F0FDF4] text-[#059669] border-[#D1FAE5]"><DollarSign size={13}/>{salary}</span>}
+              <span className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border border-[#E5E7EB] bg-[#F8FAFC] text-[#94A3B8]"><Clock size={13}/>{timeAgo(job.created_at)}</span>
+            </div>
+            {job.skills?.length > 0 && (
+              <div className="mb-6 pb-6 border-b border-[#E5E7EB]">
+                <p className="text-xs font-semibold text-[#64748B] uppercase tracking-wide mb-2">Стек / Навыки</p>
+                <div className="flex flex-wrap gap-2">{job.skills.map((s: string) => <span key={s} className="text-xs px-2.5 py-1 rounded-full bg-[#EDE9FE] text-[#7C3AED] border border-[#DDD6FE] font-medium">{s}</span>)}</div>
+              </div>
+            )}
+            {job.tags?.length > 0 && (
+              <div className="mb-6 pb-6 border-b border-[#E5E7EB]">
+                <p className="text-xs font-semibold text-[#64748B] uppercase tracking-wide mb-2 flex items-center gap-1"><Hash size={11}/>Теги</p>
+                <div className="flex flex-wrap gap-1.5">{job.tags.map((t: string) => <span key={t} className="text-xs px-2 py-0.5 rounded-full bg-[#F0FDF4] text-[#16A34A] border border-[#BBF7D0]">{t}</span>)}</div>
+              </div>
+            )}
+            <div>
+              <p className="text-xs font-semibold text-[#64748B] uppercase tracking-wide mb-3">Описание</p>
+              <div className="text-sm text-[#0F172A] leading-relaxed whitespace-pre-wrap">{job.description}</div>
+            </div>
+          </div>
+          <div className="space-y-4"><ApplyBlock job={job}/></div>
         </div>
-      )}
+      </div>
     </div>
   )
 }
-EOF
+ENDOFFILE
 
-echo "✅ app/dashboard/hr/page.tsx — фикс редиректа + таймаут"
+echo "✅ app/jobs/[id]/page.tsx"
 
 # ─────────────────────────────────────────────────────────────────
-# 2. /status — секретная страница диагностики Supabase
+# 2. /auth/forgot-password
 # ─────────────────────────────────────────────────────────────────
-mkdir -p app/status
+mkdir -p app/auth/forgot-password
 
-cat > app/status/page.tsx << 'EOF'
+cat > app/auth/forgot-password/page.tsx << 'ENDOFFILE'
 'use client'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import Link from 'next/link'
+import { Briefcase, ArrowLeft, Mail, Check } from 'lucide-react'
 import { supabase } from '@/lib/supabaseClient'
 
-interface Check {
-  name: string
-  status: 'ok' | 'error' | 'loading'
-  latency?: number
-  detail?: string
-}
+export default function ForgotPasswordPage() {
+  const [email, setEmail]     = useState('')
+  const [sent, setSent]       = useState(false)
+  const [error, setError]     = useState('')
+  const [loading, setLoading] = useState(false)
 
-async function runCheck(name: string, fn: () => Promise<string>): Promise<Check> {
-  const t0 = Date.now()
-  try {
-    const detail = await fn()
-    return { name, status: 'ok', latency: Date.now() - t0, detail }
-  } catch (e: any) {
-    return { name, status: 'error', latency: Date.now() - t0, detail: e.message }
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError('')
+    setLoading(true)
+    const { error: err } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${process.env.NEXT_PUBLIC_APP_URL}/auth/reset-password`,
+    })
+    setLoading(false)
+    if (err) { setError(err.message); return }
+    setSent(true)
   }
-}
-
-export default function StatusPage() {
-  const [checks, setChecks] = useState<Check[]>([
-    { name: 'Auth — getSession',      status: 'loading' },
-    { name: 'DB — jobs (SELECT)',     status: 'loading' },
-    { name: 'DB — resumes (SELECT)',  status: 'loading' },
-    { name: 'DB — settings (SELECT)', status: 'loading' },
-    { name: 'DB — users (SELECT)',    status: 'loading' },
-    { name: 'Env — SUPABASE_URL',     status: 'loading' },
-    { name: 'Env — APP_URL',          status: 'loading' },
-  ])
-  const [runAt, setRunAt] = useState<string>('')
-  const [running, setRunning] = useState(false)
-
-  const runAll = async () => {
-    setRunning(true)
-    setRunAt(new Date().toLocaleTimeString('ru-RU'))
-
-    // Reset
-    setChecks(c => c.map(x => ({ ...x, status: 'loading', detail: undefined, latency: undefined })))
-
-    const results = await Promise.all([
-      runCheck('Auth — getSession', async () => {
-        const { data, error } = await supabase.auth.getSession()
-        if (error) throw new Error(error.message)
-        return data.session ? `Залогинен: ${data.session.user.email}` : 'Анонимный пользователь'
-      }),
-      runCheck('DB — jobs (SELECT)', async () => {
-        const { count, error } = await supabase.from('jobs').select('id', { count: 'exact', head: true })
-        if (error) throw new Error(error.message)
-        return `${count ?? 0} записей`
-      }),
-      runCheck('DB — resumes (SELECT)', async () => {
-        const { count, error } = await supabase.from('resumes').select('id', { count: 'exact', head: true })
-        if (error) throw new Error(error.message)
-        return `${count ?? 0} записей`
-      }),
-      runCheck('DB — settings (SELECT)', async () => {
-        const { data, error } = await supabase.from('settings').select('*').eq('id', 1).single()
-        if (error) throw new Error(error.message)
-        return `header=${data.header_enabled} tg=${data.telegram_autopost_enabled}`
-      }),
-      runCheck('DB — users (SELECT)', async () => {
-        const { data: auth } = await supabase.auth.getSession()
-        if (!auth.session) return 'Пропущено (не авторизован)'
-        const { data, error } = await supabase.from('users').select('role').eq('id', auth.session.user.id).single()
-        if (error) throw new Error(error.message)
-        return `role = ${data.role}`
-      }),
-      runCheck('Env — SUPABASE_URL', async () => {
-        const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-        if (!url) throw new Error('NEXT_PUBLIC_SUPABASE_URL не задан')
-        return url
-      }),
-      runCheck('Env — APP_URL', async () => {
-        const url = process.env.NEXT_PUBLIC_APP_URL
-        if (!url) throw new Error('NEXT_PUBLIC_APP_URL не задан')
-        return url
-      }),
-    ])
-
-    setChecks(results)
-    setRunning(false)
-  }
-
-  useEffect(() => { runAll() }, [])
-
-  const allOk    = checks.every(c => c.status === 'ok')
-  const hasError = checks.some(c => c.status === 'error')
-  const isLoading = checks.some(c => c.status === 'loading')
 
   return (
-    <div className="min-h-screen bg-[#0F172A] text-white px-4 py-12 font-mono">
-      <div className="max-w-2xl mx-auto">
-
-        {/* Header */}
-        <div className="flex items-center justify-between mb-8">
-          <div>
-            <div className="flex items-center gap-3 mb-1">
-              <div className={`w-3 h-3 rounded-full ${isLoading ? 'bg-amber-400 animate-pulse' : allOk ? 'bg-green-400' : 'bg-red-500'}`}/>
-              <h1 className="text-lg font-bold">System Status</h1>
-              <span className="text-xs text-[#475569] bg-[#1E293B] px-2 py-0.5 rounded">ВакансияРФ</span>
+    <div className="min-h-[calc(100vh-56px)] bg-[#F8FAFC] flex items-center justify-center px-4 py-12">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-8">
+          <div className="w-12 h-12 bg-[#7C3AED] rounded-2xl flex items-center justify-center mx-auto mb-4"><Briefcase size={22} className="text-white"/></div>
+          <h1 className="text-2xl font-bold text-[#0F172A]">Восстановление пароля</h1>
+          <p className="text-sm text-[#64748B] mt-1">Отправим ссылку для сброса на email</p>
+        </div>
+        <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-7 shadow-sm">
+          {sent ? (
+            <div className="text-center py-4">
+              <div className="w-14 h-14 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-4"><Check size={28} className="text-[#10B981]"/></div>
+              <h2 className="font-bold text-[#0F172A] mb-2">Письмо отправлено!</h2>
+              <p className="text-sm text-[#64748B] mb-1">Проверьте почту <span className="font-medium text-[#0F172A]">{email}</span></p>
+              <p className="text-xs text-[#94A3B8] mb-6">Письмо может прийти через несколько минут. Проверьте папку «Спам».</p>
+              <Link href="/auth/login" className="inline-flex items-center gap-1.5 text-sm text-[#7C3AED] hover:underline"><ArrowLeft size={13}/>Вернуться ко входу</Link>
             </div>
-            {runAt && <p className="text-xs text-[#475569]">Проверка в {runAt}</p>}
-          </div>
-          <button
-            onClick={runAll}
-            disabled={running}
-            className="flex items-center gap-2 h-8 px-4 bg-[#1E293B] hover:bg-[#334155] border border-[#334155] text-xs rounded-lg transition-colors disabled:opacity-50"
-          >
-            {running ? (
-              <span className="w-3 h-3 border border-[#475569] border-t-white rounded-full animate-spin"/>
-            ) : '↻'} Повторить
-          </button>
-        </div>
-
-        {/* Overall status */}
-        <div className={`rounded-xl border p-4 mb-6 text-sm ${
-          isLoading ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' :
-          allOk     ? 'bg-green-500/10 border-green-500/30 text-green-400' :
-                      'bg-red-500/10 border-red-500/30 text-red-400'
-        }`}>
-          {isLoading ? '⏳ Выполняется проверка...' :
-           allOk     ? '✅ Все системы работают нормально' :
-                       `⛔ Обнаружены проблемы: ${checks.filter(c=>c.status==='error').length} из ${checks.length}`}
-        </div>
-
-        {/* Checks */}
-        <div className="space-y-2">
-          {checks.map((c) => (
-            <div key={c.name} className="bg-[#1E293B] border border-[#334155] rounded-lg px-4 py-3 flex items-center gap-3">
-              <div className="shrink-0 w-5 text-center">
-                {c.status === 'loading' && <span className="inline-block w-3 h-3 border border-[#475569] border-t-amber-400 rounded-full animate-spin"/>}
-                {c.status === 'ok'      && <span className="text-green-400">✓</span>}
-                {c.status === 'error'   && <span className="text-red-500">✗</span>}
+          ) : (
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-[#0F172A]">Email</label>
+                <div className="relative">
+                  <Mail size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#94A3B8]"/>
+                  <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" required
+                    className="h-10 w-full pl-9 pr-3 rounded-[10px] border border-[#E5E7EB] text-sm placeholder:text-[#94A3B8] focus:outline-none focus:border-[#7C3AED] focus:ring-2 focus:ring-[#7C3AED]/10"/>
+                </div>
               </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm text-[#E2E8F0]">{c.name}</p>
-                {c.detail && (
-                  <p className={`text-xs mt-0.5 truncate ${c.status === 'error' ? 'text-red-400' : 'text-[#64748B]'}`}>
-                    {c.detail}
-                  </p>
-                )}
+              {error && <div className="bg-[#FEF2F2] border border-[#FECACA] rounded-[8px] px-3 py-2 text-xs text-[#EF4444]">{error}</div>}
+              <button type="submit" disabled={loading || !email}
+                className="w-full h-10 bg-[#7C3AED] hover:bg-[#6D28D9] text-white font-semibold rounded-[10px] text-sm flex items-center justify-center gap-2 disabled:opacity-50 transition-colors">
+                {loading ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"/> : 'Отправить ссылку'}
+              </button>
+              <div className="text-center">
+                <Link href="/auth/login" className="inline-flex items-center gap-1.5 text-sm text-[#64748B] hover:text-[#0F172A] transition-colors"><ArrowLeft size={13}/>Вернуться ко входу</Link>
               </div>
-              {c.latency !== undefined && (
-                <span className={`shrink-0 text-xs px-2 py-0.5 rounded ${
-                  c.latency < 300  ? 'text-green-400 bg-green-400/10' :
-                  c.latency < 1000 ? 'text-amber-400 bg-amber-400/10' :
-                                     'text-red-400 bg-red-400/10'
-                }`}>
-                  {c.latency}ms
-                </span>
-              )}
-            </div>
-          ))}
+            </form>
+          )}
         </div>
-
-        {/* Env block */}
-        <div className="mt-6 bg-[#1E293B] border border-[#334155] rounded-xl p-4 text-xs text-[#475569] space-y-1">
-          <p className="text-[#64748B] font-semibold mb-2">Переменные окружения</p>
-          <p>SUPABASE_URL: <span className="text-[#94A3B8]">{process.env.NEXT_PUBLIC_SUPABASE_URL ? '✓ задан' : '✗ не задан'}</span></p>
-          <p>SUPABASE_ANON_KEY: <span className="text-[#94A3B8]">{process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ? '✓ задан' : '✗ не задан'}</span></p>
-          <p>APP_URL: <span className="text-[#94A3B8]">{process.env.NEXT_PUBLIC_APP_URL || '✗ не задан'}</span></p>
-        </div>
-
-        <p className="text-center text-[#334155] text-xs mt-8">
-          Секретная страница диагностики · /status
-        </p>
       </div>
     </div>
   )
 }
-EOF
+ENDOFFILE
 
-echo "✅ app/status/page.tsx — страница диагностики"
+echo "✅ app/auth/forgot-password/page.tsx"
 
 # ─────────────────────────────────────────────────────────────────
-# 3. Candidate dashboard — тот же паттерн с таймаутом и ошибками
+# 3. /auth/reset-password
 # ─────────────────────────────────────────────────────────────────
-cat > app/dashboard/candidate/page.tsx << 'EOF'
+mkdir -p app/auth/reset-password
+
+cat > app/auth/reset-password/page.tsx << 'ENDOFFILE'
 'use client'
-import { useEffect, useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { Plus, FileText, LogOut, Eye } from 'lucide-react'
+import { Briefcase, Eye, EyeOff, Check } from 'lucide-react'
 import { supabase } from '@/lib/supabaseClient'
 
-function fmtDate(s: string) {
-  return new Date(s).toLocaleDateString('ru-RU', { day:'numeric', month:'short', year:'numeric' })
-}
-
-export default function CandidateDashboard() {
-  const [user, setUser]     = useState<any>(null)
-  const [resumes, setResumes] = useState<any[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError]   = useState('')
+export default function ResetPasswordPage() {
+  const [password, setPassword]         = useState('')
+  const [confirm, setConfirm]           = useState('')
+  const [showPass, setShowPass]         = useState(false)
+  const [showConf, setShowConf]         = useState(false)
+  const [loading, setLoading]           = useState(false)
+  const [error, setError]               = useState('')
+  const [success, setSuccess]           = useState(false)
+  const [sessionReady, setSessionReady] = useState(false)
   const router = useRouter()
 
   useEffect(() => {
-    let cancelled = false
-    const timeout = setTimeout(() => {
-      if (!cancelled) { setError('Supabase не отвечает. Проверьте подключение.'); setLoading(false) }
-    }, 8000)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'PASSWORD_RECOVERY') setSessionReady(true)
+    })
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session) setSessionReady(true)
+    })
+    return () => subscription.unsubscribe()
+  }, [])
 
-    async function init() {
-      try {
-        const { data: authData } = await supabase.auth.getUser()
-        if (!authData.user) { router.push('/auth/login'); return }
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError('')
+    if (password.length < 6) { setError('Пароль должен быть не менее 6 символов'); return }
+    if (password !== confirm) { setError('Пароли не совпадают'); return }
+    setLoading(true)
+    const { error: err } = await supabase.auth.updateUser({ password })
+    setLoading(false)
+    if (err) { setError(err.message); return }
+    setSuccess(true)
+    setTimeout(() => router.push('/auth/login'), 2000)
+  }
 
-        const { data: u, error: uErr } = await supabase
-          .from('users').select('*').eq('id', authData.user.id).single()
-
-        if (uErr || !u) {
-          setError('Не удалось загрузить профиль: ' + (uErr?.message || 'нет данных'))
-          setLoading(false)
-          return
-        }
-
-        // Если роль не candidate — редирект на правильный дашборд
-        if (u.role !== 'candidate') {
-          router.push(u.role === 'admin' ? '/dashboard/admin' : u.role === 'hr' ? '/dashboard/hr' : '/')
-          return
-        }
-
-        if (cancelled) return
-        setUser(u)
-
-        const { data: myResumes, error: rErr } = await supabase
-          .from('resumes')
-          .select('*')
-          .eq('user_id', authData.user.id)
-          .order('created_at', { ascending: false })
-
-        if (rErr) setError('Ошибка загрузки резюме: ' + rErr.message)
-        else setResumes(myResumes || [])
-      } catch (e: any) {
-        setError('Ошибка: ' + e.message)
-      } finally {
-        if (!cancelled) { clearTimeout(timeout); setLoading(false) }
-      }
-    }
-
-    init()
-    return () => { cancelled = true; clearTimeout(timeout) }
-  }, [router])
-
-  const handleLogout = async () => { await supabase.auth.signOut(); router.push('/') }
-
-  if (loading) return (
-    <div className="flex flex-col items-center justify-center py-32 gap-4">
-      <div className="w-8 h-8 border-2 border-[#E5E7EB] border-t-[#7C3AED] rounded-full animate-spin"/>
-      <p className="text-sm text-[#94A3B8]">Загрузка кабинета...</p>
-    </div>
-  )
-
-  if (error) return (
-    <div className="max-w-lg mx-auto px-4 py-20 text-center">
-      <div className="text-4xl mb-4">⚠️</div>
-      <h2 className="text-lg font-bold text-[#0F172A] mb-2">Ошибка загрузки</h2>
-      <p className="text-sm text-[#64748B] mb-6">{error}</p>
-      <div className="flex gap-3 justify-center">
-        <button onClick={() => window.location.reload()}
-          className="h-9 px-4 bg-[#7C3AED] text-white text-sm rounded-[8px] hover:bg-[#6D28D9]">
-          Обновить
-        </button>
-        <Link href="/status"
-          className="h-9 px-4 border border-[#E5E7EB] text-sm rounded-[8px] text-[#64748B] hover:bg-[#F8FAFC] flex items-center">
-          Проверить статус
-        </Link>
+  if (!sessionReady) return (
+    <div className="min-h-[calc(100vh-56px)] bg-[#F8FAFC] flex items-center justify-center px-4">
+      <div className="text-center">
+        <div className="w-8 h-8 border-2 border-[#E5E7EB] border-t-[#7C3AED] rounded-full animate-spin mx-auto mb-4"/>
+        <p className="text-sm text-[#64748B]">Проверяем ссылку...</p>
       </div>
     </div>
   )
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-10">
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-2xl font-bold text-[#0F172A]">Кабинет соискателя</h1>
-          <p className="text-sm text-[#64748B] mt-0.5">{user?.name || user?.email}</p>
+    <div className="min-h-[calc(100vh-56px)] bg-[#F8FAFC] flex items-center justify-center px-4 py-12">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-8">
+          <div className="w-12 h-12 bg-[#7C3AED] rounded-2xl flex items-center justify-center mx-auto mb-4"><Briefcase size={22} className="text-white"/></div>
+          <h1 className="text-2xl font-bold text-[#0F172A]">Новый пароль</h1>
+          <p className="text-sm text-[#64748B] mt-1">Придумайте надёжный пароль</p>
         </div>
-        <div className="flex gap-2">
-          <Link href="/dashboard/candidate/create-resume"
-            className="flex items-center gap-2 h-10 px-4 bg-[#10B981] hover:bg-[#059669] text-white text-sm font-medium rounded-[10px] transition-colors">
-            <Plus size={15}/>Создать резюме
-          </Link>
-          <button onClick={handleLogout}
-            className="flex items-center gap-2 h-10 px-4 border border-[#E5E7EB] text-[#64748B] hover:bg-[#F8FAFC] text-sm rounded-[10px]">
-            <LogOut size={14}/>Выйти
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4 mb-8">
-        {[
-          ['Всего резюме',  resumes.length,                          'text-[#7C3AED]'],
-          ['Опубликовано',  resumes.filter(r => r.visible).length,  'text-[#10B981]'],
-        ].map(([l, v, c]) => (
-          <div key={String(l)} className="bg-white rounded-[14px] border border-[#E5E7EB] p-5">
-            <p className={`text-2xl font-bold ${c}`}>{v}</p>
-            <p className="text-xs text-[#64748B] mt-1">{l}</p>
-          </div>
-        ))}
-      </div>
-
-      {resumes.length === 0 ? (
-        <div className="bg-white rounded-[20px] border border-dashed border-[#E5E7EB] p-16 text-center">
-          <FileText size={28} className="text-[#94A3B8] mx-auto mb-3"/>
-          <h3 className="font-semibold text-[#0F172A] mb-1">Нет резюме</h3>
-          <p className="text-sm text-[#64748B] mb-5">Создайте своё первое резюме</p>
-          <Link href="/dashboard/candidate/create-resume"
-            className="inline-flex items-center gap-2 h-10 px-5 bg-[#10B981] hover:bg-[#059669] text-white text-sm font-medium rounded-[10px] transition-colors">
-            <Plus size={14}/>Создать
-          </Link>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {resumes.map(r => (
-            <div key={r.id} className="bg-white rounded-[14px] border border-[#E5E7EB] p-4 flex items-center justify-between gap-4">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 mb-0.5">
-                  <p className="font-medium text-[#0F172A] truncate">{r.title || r.name}</p>
-                  <span className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${r.visible ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'}`}>
-                    {r.visible ? 'Опубликовано' : 'На модерации'}
-                  </span>
-                </div>
-                <p className="text-xs text-[#64748B]">{r.name} · {fmtDate(r.created_at)}</p>
-              </div>
-              <Link href={`/resumes/${r.id}`}
-                className="w-8 h-8 rounded-[6px] border border-[#E5E7EB] flex items-center justify-center text-[#64748B] hover:text-[#7C3AED] hover:border-[#7C3AED] transition-colors">
-                <Eye size={13}/>
-              </Link>
+        <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-7 shadow-sm">
+          {success ? (
+            <div className="text-center py-4">
+              <div className="w-14 h-14 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-4"><Check size={28} className="text-[#10B981]"/></div>
+              <h2 className="font-bold text-[#0F172A] mb-2">Пароль изменён!</h2>
+              <p className="text-sm text-[#64748B]">Перенаправляем на страницу входа...</p>
             </div>
-          ))}
+          ) : (
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-[#0F172A]">Новый пароль</label>
+                <div className="relative">
+                  <input type={showPass ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} placeholder="Минимум 6 символов" required
+                    className="h-10 w-full pl-3 pr-10 rounded-[10px] border border-[#E5E7EB] text-sm placeholder:text-[#94A3B8] focus:outline-none focus:border-[#7C3AED] focus:ring-2 focus:ring-[#7C3AED]/10"/>
+                  <button type="button" onClick={() => setShowPass(v => !v)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#94A3B8] hover:text-[#64748B]">
+                    {showPass ? <EyeOff size={15}/> : <Eye size={15}/>}
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-[#0F172A]">Повторите пароль</label>
+                <div className="relative">
+                  <input type={showConf ? 'text' : 'password'} value={confirm} onChange={e => setConfirm(e.target.value)} placeholder="Повторите пароль" required
+                    className="h-10 w-full pl-3 pr-10 rounded-[10px] border border-[#E5E7EB] text-sm placeholder:text-[#94A3B8] focus:outline-none focus:border-[#7C3AED] focus:ring-2 focus:ring-[#7C3AED]/10"/>
+                  <button type="button" onClick={() => setShowConf(v => !v)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#94A3B8] hover:text-[#64748B]">
+                    {showConf ? <EyeOff size={15}/> : <Eye size={15}/>}
+                  </button>
+                </div>
+                {confirm && <p className={`text-xs ${password === confirm ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{password === confirm ? '✓ Пароли совпадают' : '✗ Пароли не совпадают'}</p>}
+              </div>
+              {error && <div className="bg-[#FEF2F2] border border-[#FECACA] rounded-[8px] px-3 py-2 text-xs text-[#EF4444]">{error}</div>}
+              <button type="submit" disabled={loading || !password || !confirm}
+                className="w-full h-10 bg-[#7C3AED] hover:bg-[#6D28D9] text-white font-semibold rounded-[10px] text-sm flex items-center justify-center gap-2 disabled:opacity-50 transition-colors">
+                {loading ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"/> : 'Сохранить новый пароль'}
+              </button>
+              <div className="text-center">
+                <Link href="/auth/login" className="text-sm text-[#64748B] hover:text-[#0F172A] transition-colors">Вернуться ко входу</Link>
+              </div>
+            </form>
+          )}
         </div>
-      )}
+      </div>
     </div>
   )
 }
-EOF
+ENDOFFILE
 
-echo "✅ app/dashboard/candidate/page.tsx — таймаут + правильный роль-редирект"
+echo "✅ app/auth/reset-password/page.tsx"
+
+# ─────────────────────────────────────────────────────────────────
+# 4. Ссылка «Забыли пароль?» в login — awk (macOS + Linux)
+# ─────────────────────────────────────────────────────────────────
+LOGIN_FILE="app/auth/login/page.tsx"
+
+if grep -q "forgot-password" "$LOGIN_FILE"; then
+  echo "✅ Ссылка уже есть в $LOGIN_FILE"
+else
+  awk '
+  /errors\.password&&/ {
+    print
+    print "              <div className=\"flex justify-end\">"
+    print "                <Link href=\"/auth/forgot-password\" className=\"text-xs text-[#7C3AED] hover:underline\">Забыли пароль?</Link>"
+    print "              </div>"
+    next
+  }
+  { print }
+  ' "$LOGIN_FILE" > /tmp/_login_patched.tsx
+  mv /tmp/_login_patched.tsx "$LOGIN_FILE"
+  echo "✅ Ссылка «Забыли пароль?» добавлена в login"
+fi
+
+# ─────────────────────────────────────────────────────────────────
+# 5. Инструкция по Supabase
+# ─────────────────────────────────────────────────────────────────
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════╗"
+echo "║  ⚠️  Supabase → Authentication → URL Configuration → добавь:    ║"
+echo "║                                                                   ║"
+echo "║  Redirect URLs:                                                   ║"
+echo "║    https://твой-проект.vercel.app/auth/reset-password            ║"
+echo "║    http://localhost:3000/auth/reset-password                      ║"
+echo "╚═══════════════════════════════════════════════════════════════════╝"
 
 rm -rf .next
 echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  ✅ Готово!                                                  ║"
-echo "║                                                              ║"
-echo "║  Страница диагностики: http://localhost:3000/status         ║"
-echo "║  (покажет все проверки Supabase в реальном времени)         ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-echo ""
-echo "npm run dev"
+echo "✅ Готово. npm run dev"
