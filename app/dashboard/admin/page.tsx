@@ -131,6 +131,14 @@ export default function AdminDashboard() {
               <TrendingUp size={13}/>
               Аналитика
             </Link>
+            <Link href="/dashboard/admin/analytics" className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] bg-[#7C3AED]/10 hover:bg-[#7C3AED]/20 text-[#7C3AED] text-xs font-semibold border border-[#7C3AED]/20 transition-colors">
+              <TrendingUp size={13}/>
+              Аналитика
+            </Link>
+            <Link href="/dashboard/admin/analytics" className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] bg-[#7C3AED]/10 hover:bg-[#7C3AED]/20 text-[#7C3AED] text-xs font-semibold border border-[#7C3AED]/20 transition-colors">
+              <TrendingUp size={13}/>
+              Аналитика
+            </Link>
         </div>
         <button onClick={handleLogout} className="flex items-center gap-2 h-10 px-4 border border-[#E5E7EB] text-[#64748B] hover:bg-[#F8FAFC] text-sm rounded-[10px]"><LogOut size={14}/>Выйти</button>
       </div>
