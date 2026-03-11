@@ -127,6 +127,10 @@ export default function AdminDashboard() {
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-[#EDE9FE] rounded-xl flex items-center justify-center"><ShieldCheck size={18} className="text-[#7C3AED]"/></div>
           <div><h1 className="text-2xl font-bold text-[#0F172A]">Панель администратора</h1><p className="text-sm text-[#64748B]">{user?.email}</p></div>
+            <Link href="/dashboard/admin/analytics" className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] bg-[#7C3AED]/10 hover:bg-[#7C3AED]/20 text-[#7C3AED] text-xs font-semibold border border-[#7C3AED]/20 transition-colors">
+              <TrendingUp size={13}/>
+              Аналитика
+            </Link>
         </div>
         <button onClick={handleLogout} className="flex items-center gap-2 h-10 px-4 border border-[#E5E7EB] text-[#64748B] hover:bg-[#F8FAFC] text-sm rounded-[10px]"><LogOut size={14}/>Выйти</button>
       </div>

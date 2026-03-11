@@ -19,7 +19,16 @@ async function runCheck(name: string, fn: () => Promise<string>, ms = 5000): Pro
     const detail = await withTimeout(fn(), ms)
     return { name, status: 'ok', latency: Date.now() - t0, detail }
   } catch (e: any) {
-    return { name, status: e.message?.includes('Таймаут') ? 'timeout' : 'error', latency: Date.now() - t0, detail: e.message }
+    const isTimeout = e.message?.includes('Таймаут')
+    const isFetch   = e.message?.includes('Failed to fetch')
+    return {
+      name,
+      status: isTimeout ? 'timeout' : 'error',
+      latency: Date.now() - t0,
+      detail: isFetch
+        ? 'Failed to fetch — неверный SUPABASE_URL или нет сети'
+        : e.message,
+    }
   }
 }
 
@@ -33,6 +42,23 @@ const INITIAL: Check[] = [
   { name: 'Env — APP_URL',          status: 'loading' },
 ]
 
+// ── Диагноз по результатам ─────────────────────────────────────
+function diagnose(checks: Check[]): { text: string; color: string } | null {
+  const url = checks.find(c => c.name === 'Env — SUPABASE_URL')
+  const jobs = checks.find(c => c.name === 'DB — jobs (SELECT)')
+
+  if (url?.detail?.includes('your-project') || url?.detail?.includes('placeholder')) {
+    return { text: '⚠️ NEXT_PUBLIC_SUPABASE_URL содержит placeholder — замени на реальный URL в .env.local и перезапусти сервер', color: 'text-red-400 bg-red-500/10 border-red-500/20' }
+  }
+  if (jobs?.detail?.includes('Failed to fetch')) {
+    return { text: '⚠️ Failed to fetch — проверь NEXT_PUBLIC_SUPABASE_URL в .env.local. Значение должно быть https://xxxxxx.supabase.co', color: 'text-red-400 bg-red-500/10 border-red-500/20' }
+  }
+  if (jobs?.status === 'timeout') {
+    return { text: '⏱ Supabase не отвечает — возможно Free план заснул. Подожди 10 сек и нажми «Повторить»', color: 'text-amber-400 bg-amber-500/10 border-amber-500/20' }
+  }
+  return null
+}
+
 export default function StatusPage() {
   const router = useRouter()
   const [checks, setChecks]         = useState<Check[]>(INITIAL)
@@ -40,42 +66,58 @@ export default function StatusPage() {
   const [running, setRunning]       = useState(false)
   const [authState, setAuthState]   = useState<'checking' | 'allowed' | 'denied'>('checking')
   const [accessMode, setAccessMode] = useState<'admin' | 'hidden' | null>(null)
+  const [ping, setPing]             = useState<{ status: 'idle' | 'loading' | 'ok' | 'error'; ms?: number; msg?: string }>({ status: 'idle' })
 
   // ── Проверка доступа ───────────────────────────────────────────
   useEffect(() => {
     const checkAccess = async () => {
-      // 1. localStorage — быстрый путь, не требует авторизации
       try {
         if (localStorage.getItem('hiddenOptions') === 'yess') {
-          setAccessMode('hidden')
-          setAuthState('allowed')
-          return
+          setAccessMode('hidden'); setAuthState('allowed'); return
         }
-      } catch (_) {
-        // localStorage недоступен (SSR / приватный режим) — идём дальше
-      }
+      } catch (_) {}
 
-      // 2. Проверяем роль admin через Supabase
       const { data: { session } } = await supabase.auth.getSession()
       if (!session) { setAuthState('denied'); return }
 
-      const { data } = await supabase
-        .from('users').select('role').eq('id', session.user.id).maybeSingle()
-
-      if (data?.role === 'admin') {
-        setAccessMode('admin')
-        setAuthState('allowed')
-      } else {
-        setAuthState('denied')
-      }
+      const { data } = await supabase.from('users').select('role').eq('id', session.user.id).maybeSingle()
+      if (data?.role === 'admin') { setAccessMode('admin'); setAuthState('allowed') }
+      else setAuthState('denied')
     }
     checkAccess()
   }, [])
 
-  // Редирект если нет доступа
   useEffect(() => {
     if (authState === 'denied') router.replace('/')
   }, [authState, router])
+
+  // ── Ping DB ────────────────────────────────────────────────────
+  const handlePing = async () => {
+    setPing({ status: 'loading' })
+    const t0 = Date.now()
+    try {
+      await withTimeout(
+        supabase.from('jobs').select('id', { count: 'exact', head: true }).then(r => {
+          if (r.error) throw new Error(r.error.message)
+          return r
+        }),
+        6000
+      )
+      setPing({ status: 'ok', ms: Date.now() - t0, msg: 'Supabase отвечает' })
+    } catch (e: any) {
+      const ms = Date.now() - t0
+      const isFetch = e.message?.includes('Failed to fetch')
+      setPing({
+        status: 'error',
+        ms,
+        msg: isFetch
+          ? 'Failed to fetch — неверный SUPABASE_URL или нет сети'
+          : e.message?.includes('Таймаут')
+          ? 'Таймаут — Supabase не отвечает (возможно заснул)'
+          : e.message,
+      })
+    }
+  }
 
   // ── Диагностика ────────────────────────────────────────────────
   const updateCheck = (name: string, result: Check) =>
@@ -85,6 +127,7 @@ export default function StatusPage() {
     setRunning(true)
     setRunAt(new Date().toLocaleTimeString('ru-RU'))
     setChecks(INITIAL)
+    setPing({ status: 'idle' })
 
     const checkDefs = [
       {
@@ -114,8 +157,7 @@ export default function StatusPage() {
       {
         name: 'DB — settings (SELECT)',
         fn: async () => {
-          const { data, error } = await supabase
-            .from('settings').select('header_enabled,telegram_autopost_enabled').eq('id', 1).maybeSingle()
+          const { data, error } = await supabase.from('settings').select('header_enabled,telegram_autopost_enabled').eq('id', 1).maybeSingle()
           if (error) throw new Error(error.message)
           if (!data) throw new Error('Нет строки settings с id=1')
           return `hero=${data.header_enabled} tg=${data.telegram_autopost_enabled}`
@@ -126,8 +168,7 @@ export default function StatusPage() {
         fn: async () => {
           const { data: auth } = await supabase.auth.getSession()
           if (!auth.session) return 'Пропущено (не авторизован)'
-          const { data, error } = await supabase
-            .from('users').select('role').eq('id', auth.session.user.id).maybeSingle()
+          const { data, error } = await supabase.from('users').select('role').eq('id', auth.session.user.id).maybeSingle()
           if (error) throw new Error(error.message)
           if (!data) throw new Error('Нет записи в public.users — триггер не сработал при регистрации')
           return `role = ${data.role}`
@@ -138,6 +179,7 @@ export default function StatusPage() {
         fn: async () => {
           const url = process.env.NEXT_PUBLIC_SUPABASE_URL
           if (!url) throw new Error('Не задан')
+          if (url.includes('your-project') || url.includes('placeholder')) throw new Error(`Placeholder: ${url}`)
           return url
         },
       },
@@ -163,7 +205,6 @@ export default function StatusPage() {
     if (authState === 'allowed') runAll()
   }, [authState])
 
-  // ── Экраны ожидания / отказа ───────────────────────────────────
   if (authState === 'checking') return (
     <div className="min-h-screen bg-[#0F172A] flex items-center justify-center">
       <div className="text-center">
@@ -182,9 +223,9 @@ export default function StatusPage() {
     </div>
   )
 
-  // ── Основной UI ────────────────────────────────────────────────
   const allOk     = checks.every(c => c.status === 'ok')
   const isLoading = checks.some(c => c.status === 'loading')
+  const diagnosis = !isLoading ? diagnose(checks) : null
 
   const statusIcon = (s: Status) => {
     if (s === 'loading') return <span className="inline-block w-3 h-3 border border-[#475569] border-t-amber-400 rounded-full animate-spin"/>
@@ -204,18 +245,15 @@ export default function StatusPage() {
     <div className="min-h-screen bg-[#0F172A] text-white px-4 py-12 font-mono">
       <div className="max-w-2xl mx-auto">
 
+        {/* Заголовок */}
         <div className="flex items-center justify-between mb-8">
           <div>
             <div className="flex items-center gap-3 mb-1 flex-wrap">
               <div className={`w-3 h-3 rounded-full transition-colors ${isLoading ? 'bg-amber-400 animate-pulse' : allOk ? 'bg-green-400' : 'bg-red-500'}`}/>
               <h1 className="text-lg font-bold tracking-tight">System Status</h1>
               <span className="text-xs text-[#475569] bg-[#1E293B] px-2 py-0.5 rounded border border-[#334155]">ВакансияРФ</span>
-              {accessMode === 'admin' && (
-                <span className="text-xs text-[#7C3AED] bg-[#7C3AED]/10 px-2 py-0.5 rounded border border-[#7C3AED]/20">admin</span>
-              )}
-              {accessMode === 'hidden' && (
-                <span className="text-xs text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded border border-amber-400/20">hidden access</span>
-              )}
+              {accessMode === 'admin' && <span className="text-xs text-[#7C3AED] bg-[#7C3AED]/10 px-2 py-0.5 rounded border border-[#7C3AED]/20">admin</span>}
+              {accessMode === 'hidden' && <span className="text-xs text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded border border-amber-400/20">hidden</span>}
             </div>
             {runAt && <p className="text-xs text-[#475569] pl-6">Проверка в {runAt}</p>}
           </div>
@@ -226,7 +264,8 @@ export default function StatusPage() {
           </button>
         </div>
 
-        <div className={`rounded-xl border p-3.5 mb-5 text-sm font-medium ${
+        {/* Статус-баннер */}
+        <div className={`rounded-xl border p-3.5 mb-3 text-sm font-medium ${
           isLoading ? 'bg-amber-500/10 border-amber-500/20 text-amber-400' :
           allOk     ? 'bg-green-500/10  border-green-500/20  text-green-400' :
                       'bg-red-500/10    border-red-500/20    text-red-400'
@@ -236,7 +275,44 @@ export default function StatusPage() {
            `⛔ Проблемы: ${checks.filter(c => c.status !== 'ok').length} из ${checks.length}`}
         </div>
 
-        <div className="space-y-1.5">
+        {/* Диагноз */}
+        {diagnosis && (
+          <div className={`rounded-xl border px-4 py-3 mb-5 text-xs leading-relaxed ${diagnosis.color}`}>
+            {diagnosis.text}
+          </div>
+        )}
+
+        {/* ── Ping DB ─────────────────────────────────────────── */}
+        <div className="bg-[#1E293B] border border-[#334155] rounded-xl px-4 py-3 mb-5 flex items-center justify-between gap-4">
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-[#CBD5E1] mb-0.5">Ping Database</p>
+            {ping.status === 'idle' && <p className="text-xs text-[#475569]">Нажми чтобы проверить доступность Supabase</p>}
+            {ping.status === 'loading' && <p className="text-xs text-amber-400">Пингуем...</p>}
+            {ping.status === 'ok' && (
+              <p className="text-xs text-green-400">✓ {ping.msg}
+                <span className={`ml-2 px-1.5 py-0.5 rounded text-[11px] font-medium ${latencyColor(ping.ms)}`}>{ping.ms}ms</span>
+              </p>
+            )}
+            {ping.status === 'error' && <p className="text-xs text-red-400 truncate">✗ {ping.msg}</p>}
+          </div>
+          <button
+            onClick={handlePing}
+            disabled={ping.status === 'loading'}
+            className={`shrink-0 h-8 px-4 rounded-lg text-xs font-semibold border transition-colors disabled:opacity-40 ${
+              ping.status === 'ok'    ? 'bg-green-500/10 border-green-500/30 text-green-400 hover:bg-green-500/20' :
+              ping.status === 'error' ? 'bg-red-500/10 border-red-500/30 text-red-400 hover:bg-red-500/20' :
+              'bg-[#334155] border-[#475569] text-[#CBD5E1] hover:bg-[#3E4F63]'
+            }`}
+          >
+            {ping.status === 'loading'
+              ? <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin inline-block"/>
+              : ping.status === 'ok' ? '✓ OK' : ping.status === 'error' ? '✗ Retry' : '⚡ Ping'
+            }
+          </button>
+        </div>
+
+        {/* Чеки */}
+        <div className="space-y-1.5 mb-5">
           {checks.map(c => (
             <div key={c.name} className={`bg-[#1E293B] border rounded-lg px-4 py-3 flex items-center gap-3 ${
               c.status === 'error' ? 'border-red-500/40' : c.status === 'timeout' ? 'border-amber-500/40' : 'border-[#334155]'
@@ -259,28 +335,37 @@ export default function StatusPage() {
           ))}
         </div>
 
-        <div className="mt-5 bg-[#1E293B] border border-[#334155] rounded-xl p-4 space-y-1.5">
+        {/* Env */}
+        <div className="bg-[#1E293B] border border-[#334155] rounded-xl p-4 space-y-1.5 mb-4">
           <p className="text-[#64748B] text-xs font-semibold uppercase tracking-widest mb-3">Environment</p>
           {([
             ['NEXT_PUBLIC_SUPABASE_URL',      process.env.NEXT_PUBLIC_SUPABASE_URL],
             ['NEXT_PUBLIC_SUPABASE_ANON_KEY', process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY],
             ['NEXT_PUBLIC_APP_URL',           process.env.NEXT_PUBLIC_APP_URL],
-          ] as [string, string | undefined][]).map(([key, val]) => (
-            <div key={key} className="flex items-center justify-between gap-4">
-              <span className="text-xs text-[#475569]">{key}</span>
-              <span className={`text-xs font-medium ${val ? 'text-green-400' : 'text-red-400'}`}>
-                {val ? (key.includes('KEY') ? '✓ задан (скрыт)' : val) : '✗ не задан'}
-              </span>
-            </div>
-          ))}
+          ] as [string, string | undefined][]).map(([key, val]) => {
+            const isPlaceholder = val?.includes('your-project') || val?.includes('placeholder')
+            return (
+              <div key={key} className="flex items-start justify-between gap-4">
+                <span className="text-xs text-[#475569] shrink-0">{key}</span>
+                <span className={`text-xs font-medium text-right break-all ${isPlaceholder ? 'text-red-400' : val ? 'text-green-400' : 'text-red-400'}`}>
+                  {val
+                    ? key.includes('KEY') ? '✓ задан (скрыт)' : isPlaceholder ? `⚠️ placeholder: ${val}` : val
+                    : '✗ не задан'}
+                </span>
+              </div>
+            )
+          })}
         </div>
 
-        <div className="mt-4 bg-[#1E293B] border border-[#334155] rounded-xl p-4">
-          <p className="text-[#64748B] text-xs font-semibold uppercase tracking-widest mb-2">Заметки</p>
-          <p className="text-xs text-[#475569] leading-relaxed">
-            На Free (Nano) плане Supabase засыпает после ~10 минут неактивности.
-            Первый запрос занимает 2–5 сек. Если таймауты — подожди 10 сек и нажми «Повторить».
-          </p>
+        {/* Подсказки */}
+        <div className="bg-[#1E293B] border border-[#334155] rounded-xl p-4">
+          <p className="text-[#64748B] text-xs font-semibold uppercase tracking-widest mb-3">Частые причины ошибок</p>
+          <div className="space-y-2 text-xs text-[#475569] leading-relaxed">
+            <p><span className="text-red-400">Failed to fetch</span> — неверный NEXT_PUBLIC_SUPABASE_URL в .env.local</p>
+            <p><span className="text-amber-400">Таймаут</span> — Supabase Free план заснул, подожди 10 сек</p>
+            <p><span className="text-red-400">Нет записи в users</span> — триггер или RLS на public.users не настроен</p>
+            <p><span className="text-red-400">permission denied</span> — не выдан GRANT SELECT TO anon</p>
+          </div>
         </div>
 
         <p className="text-center text-[#1E293B] text-xs mt-8 select-none">/status · только для администраторов</p>
