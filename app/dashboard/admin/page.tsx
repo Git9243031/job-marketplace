@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { ShieldCheck, LogOut, Eye, EyeOff, Trash2, Users, Briefcase, FileText, ToggleLeft, ToggleRight, TrendingUp, Clock, CheckCircle, XCircle, Layout } from 'lucide-react'
+import { ShieldCheck, Download, Download, Download, LogOut, Eye, EyeOff, Trash2, Users, Briefcase, FileText, ToggleLeft, ToggleRight, TrendingUp, Clock, CheckCircle, XCircle, Layout } from 'lucide-react'
 import { supabase } from '@/lib/supabaseClient'
 import { jobsService } from '@/services/jobs'
 import { resumesService } from '@/services/resumes'
@@ -37,6 +37,7 @@ export default function AdminDashboard() {
   const [users, setUsers] = useState<any[]>([])
   const [settings, setSettings] = useState({ telegram_autopost_enabled: false, header_enabled: true, auto_approve_jobs: false, auto_approve_telegram: false })
   const [loading, setLoading] = useState(true)
+  const [exporting, setExporting] = useState<string|null>(null)
   const router = useRouter()
 
   useEffect(() => {
@@ -54,12 +55,61 @@ export default function AdminDashboard() {
       setJobs(j.data || [])
       setResumes(r.data || [])
       setUsers(us.data || [])
-      if (s.data) setSettings({ telegram_autopost_enabled: s.data.telegram_autopost_enabled, header_enabled: s.data.header_enabled ?? true, auto_approve_jobs: s.data.auto_approve_jobs ?? false, auto_approve_telegram: s.data.auto_approve_telegram ?? false })
+      if (s.data) setSettings({
+        telegram_autopost_enabled: s.data.telegram_autopost_enabled,
+        header_enabled: s.data.header_enabled ?? true,
+        auto_approve_jobs: s.data.auto_approve_jobs ?? false,
+        auto_approve_telegram: s.data.auto_approve_telegram ?? false,
+      })
       setLoading(false)
     })
   }, [router])
 
+  const [exporting, setExporting] = useState<string|null>(null)
+  const exportJobs = async (fmt: 'xlsx'|'docx') => {
+    setExporting(fmt)
+    try {
+      const res = await fetch(`/api/admin/export?format=${fmt}`)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `vacancies_${Date.now()}.${fmt}`
+      a.click()
+      URL.revokeObjectURL(url)
+    } finally { setExporting(null) }
+  }
+
+  const [exporting, setExporting] = useState<string|null>(null)
+  const exportJobs = async (fmt: 'xlsx'|'docx') => {
+    setExporting(fmt)
+    try {
+      const res = await fetch(`/api/admin/export?format=${fmt}`)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `vacancies_${Date.now()}.${fmt}`
+      a.click()
+      URL.revokeObjectURL(url)
+    } finally { setExporting(null) }
+  }
+
   const handleLogout = async () => { await supabase.auth.signOut(); router.push('/') }
+
+  const exportJobs = async (fmt: 'xlsx'|'docx') => {
+    setExporting(fmt)
+    try {
+      const res = await fetch(`/api/admin/export?format=${fmt}`)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `export_${Date.now()}.${fmt}`
+      a.click()
+      URL.revokeObjectURL(url)
+    } finally { setExporting(null) }
+  }
 
   const toggleJobVis = async (id: string, cur: boolean) => {
     await jobsService.toggleVisibility(id, !cur)
@@ -68,11 +118,6 @@ export default function AdminDashboard() {
   const toggleResumeVis = async (id: string, cur: boolean) => {
     await resumesService.toggleVisibility(id, !cur)
     setResumes(prev => prev.map(r => r.id===id?{...r,visible:!cur}:r))
-  }
-  const toggleTelegram = async () => {
-    const next = !settings.telegram_autopost_enabled
-    await adminService.updateTelegramAutopost(next)
-    setSettings(s=>({...s,telegram_autopost_enabled:next}))
   }
   const toggleHeader = async () => {
     const next = !settings.header_enabled
@@ -122,25 +167,56 @@ export default function AdminDashboard() {
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-10">
+
       {/* Header */}
       <div className="flex items-center justify-between mb-8">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-[#EDE9FE] rounded-xl flex items-center justify-center"><ShieldCheck size={18} className="text-[#7C3AED]"/></div>
-          <div><h1 className="text-2xl font-bold text-[#0F172A]">Панель администратора</h1><p className="text-sm text-[#64748B]">{user?.email}</p></div>
-            <Link href="/dashboard/admin/analytics" className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] bg-[#7C3AED]/10 hover:bg-[#7C3AED]/20 text-[#7C3AED] text-xs font-semibold border border-[#7C3AED]/20 transition-colors">
-              <TrendingUp size={13}/>
-              Аналитика
-            </Link>
-            <Link href="/dashboard/admin/analytics" className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] bg-[#7C3AED]/10 hover:bg-[#7C3AED]/20 text-[#7C3AED] text-xs font-semibold border border-[#7C3AED]/20 transition-colors">
-              <TrendingUp size={13}/>
-              Аналитика
-            </Link>
-            <Link href="/dashboard/admin/analytics" className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] bg-[#7C3AED]/10 hover:bg-[#7C3AED]/20 text-[#7C3AED] text-xs font-semibold border border-[#7C3AED]/20 transition-colors">
-              <TrendingUp size={13}/>
-              Аналитика
-            </Link>
+          <div className="w-10 h-10 bg-[#EDE9FE] rounded-xl flex items-center justify-center">
+            <ShieldCheck size={18} className="text-[#7C3AED]"/>
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold text-[#0F172A]">Панель администратора</h1>
+            <p className="text-sm text-[#64748B]">{user?.email}</p>
+          </div>
+          <Link
+            href="/dashboard/admin/analytics"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] bg-[#7C3AED]/10 hover:bg-[#7C3AED]/20 text-[#7C3AED] text-xs font-semibold border border-[#7C3AED]/20 transition-colors"
+          >
+            <TrendingUp size={13}/>
+            Аналитика
+          </Link>
         </div>
-        <button onClick={handleLogout} className="flex items-center gap-2 h-10 px-4 border border-[#E5E7EB] text-[#64748B] hover:bg-[#F8FAFC] text-sm rounded-[10px]"><LogOut size={14}/>Выйти</button>
+
+        {/* Кнопки экспорта + выход */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => exportJobs('xlsx')}
+            disabled={!!exporting}
+            className="flex items-center gap-1.5 h-10 px-4 border border-[#E5E7EB] text-[#64748B] hover:bg-[#F0FDF4] hover:text-[#10B981] hover:border-[#10B981]/30 text-sm rounded-[10px] transition-colors disabled:opacity-50"
+          >
+            {exporting === 'xlsx'
+              ? <span className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin"/>
+              : <Download size={14}/>}
+            Excel
+          </button>
+          <button
+            onClick={() => exportJobs('docx')}
+            disabled={!!exporting}
+            className="flex items-center gap-1.5 h-10 px-4 border border-[#E5E7EB] text-[#64748B] hover:bg-[#EDE9FE] hover:text-[#7C3AED] hover:border-[#DDD6FE] text-sm rounded-[10px] transition-colors disabled:opacity-50"
+          >
+            {exporting === 'docx'
+              ? <span className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin"/>
+              : <Download size={14}/>}
+            Word
+          </button>
+          <button
+            onClick={handleLogout}
+            className="flex items-center gap-1.5 h-10 px-4 bg-[#F1F5F9] hover:bg-[#E5E7EB] text-[#64748B] text-sm rounded-[10px] transition-colors"
+          >
+            <LogOut size={14}/>
+            Выйти
+          </button>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -162,7 +238,6 @@ export default function AdminDashboard() {
             <StatCard icon={Users}       label="Пользователей"    value={stats.totalUsers}   sub={`${stats.hrUsers} HR, ${stats.candidates} кандидатов`} color="bg-blue-500"/>
           </div>
           <div className="grid md:grid-cols-2 gap-4">
-            {/* Pending jobs */}
             <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="font-semibold text-[#0F172A]">Ожидают проверки</h2>
@@ -176,7 +251,6 @@ export default function AdminDashboard() {
               ))}
               {jobs.filter(j=>!j.visible).length===0&&<p className="text-sm text-[#94A3B8] text-center py-4">Нет ожидающих</p>}
             </div>
-            {/* Recent activity */}
             <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6">
               <h2 className="font-semibold text-[#0F172A] mb-4">Последние вакансии</h2>
               {jobs.slice(0,5).map(j=>(
@@ -195,7 +269,10 @@ export default function AdminDashboard() {
         <div className="space-y-3">
           <div className="flex items-center justify-between mb-2">
             <p className="text-sm text-[#64748B]">Всего: <span className="font-semibold text-[#0F172A]">{jobs.length}</span></p>
-            <div className="flex gap-2 text-xs"><span className="bg-green-50 text-green-700 px-2 py-0.5 rounded-full">✓ {stats.pubJobs} опубликовано</span><span className="bg-amber-50 text-amber-700 px-2 py-0.5 rounded-full">⏳ {stats.pendingJobs} на модерации</span></div>
+            <div className="flex gap-2 text-xs">
+              <span className="bg-green-50 text-green-700 px-2 py-0.5 rounded-full">✓ {stats.pubJobs} опубликовано</span>
+              <span className="bg-amber-50 text-amber-700 px-2 py-0.5 rounded-full">⏳ {stats.pendingJobs} на модерации</span>
+            </div>
           </div>
           {jobs.map(j=>(
             <div key={j.id} className="bg-white rounded-[14px] border border-[#E5E7EB] p-4 flex items-center justify-between gap-4">
@@ -278,7 +355,6 @@ export default function AdminDashboard() {
       {tab==='settings' && (
         <div className="max-w-2xl space-y-4">
 
-          {/* Hero-блок */}
           <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 shadow-sm">
             <div className="flex items-center justify-between">
               <div>
@@ -293,13 +369,11 @@ export default function AdminDashboard() {
               <button onClick={toggleHeader}>
                 {settings.header_enabled
                   ? <ToggleRight size={40} className="text-[#7C3AED] cursor-pointer hover:opacity-80 transition-opacity"/>
-                  : <ToggleLeft  size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>
-                }
+                  : <ToggleLeft  size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>}
               </button>
             </div>
           </div>
 
-          {/* Автомодерация сайта */}
           <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 shadow-sm">
             <div className="flex items-center justify-between">
               <div>
@@ -312,13 +386,11 @@ export default function AdminDashboard() {
               <button onClick={toggleAutoApproveJobs}>
                 {settings.auto_approve_jobs
                   ? <ToggleRight size={40} className="text-[#7C3AED] cursor-pointer hover:opacity-80 transition-opacity"/>
-                  : <ToggleLeft  size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>
-                }
+                  : <ToggleLeft  size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>}
               </button>
             </div>
           </div>
 
-          {/* Автопостинг в Telegram */}
           <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 shadow-sm">
             <div className="flex items-center justify-between">
               <div>
@@ -331,13 +403,11 @@ export default function AdminDashboard() {
               <button onClick={toggleAutoApproveTelegram}>
                 {settings.auto_approve_telegram
                   ? <ToggleRight size={40} className="text-[#7C3AED] cursor-pointer hover:opacity-80 transition-opacity"/>
-                  : <ToggleLeft  size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>
-                }
+                  : <ToggleLeft  size={40} className="text-[#94A3B8] cursor-pointer hover:opacity-80 transition-opacity"/>}
               </button>
             </div>
           </div>
 
-          {/* Env инфо */}
           <div className="bg-[#EDE9FE] rounded-[16px] p-5 text-sm text-[#7C3AED]">
             <p className="font-semibold mb-2">Telegram настройки (.env.local / Vercel)</p>
             <div className="space-y-1 text-[#6D28D9] text-xs font-mono bg-[#DDD6FE]/50 rounded-[8px] p-3">
@@ -349,6 +419,7 @@ export default function AdminDashboard() {
 
         </div>
       )}
+
     </div>
   )
 }

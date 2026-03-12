@@ -22,13 +22,11 @@ const CONTRACT_TYPES = [{value:'',label:'Тип договора (опциона
 const DESC_PLACEHOLDER = `🛠 Чем будете заниматься:\n• ...\n\n🔧 Стек: TypeScript, Vue, ...\n\n✨ Обязательно:\n• Опыт коммерческой разработки от N лет\n\n💼 Мы предлагаем:\n• Полную удалёнку и гибкий график`
 
 export default function CreateJobPage() {
-  const [user, setUser]             = useState<any>(null)
+  const [user, setUser]               = useState<any>(null)
   const [serverError, setServerError] = useState('')
-  const [copied, setCopied]         = useState(false)
-  const [jobId, setJobId]           = useState('')
-  const [jobUrl, setJobUrl]         = useState('')
-  // Настройки модерации из adminService
-  const [autoApproveJobs, setAutoApproveJobs]         = useState(false)
+  const [copied, setCopied]           = useState(false)
+  const [jobId, setJobId]             = useState('')
+  const [jobUrl, setJobUrl]           = useState('')
   const [autoApproveTelegram, setAutoApproveTelegram] = useState(false)
   const router = useRouter()
 
@@ -46,12 +44,9 @@ export default function CreateJobPage() {
       if (!u || (u.role !== 'hr' && u.role !== 'admin')) { router.push('/'); return }
       setUser(u)
     })
-    supabase.from('settings').select('auto_approve_jobs,auto_approve_telegram').eq('id', 1).single()
+    supabase.from('settings').select('auto_approve_telegram').eq('id', 1).single()
       .then(({ data }) => {
-        if (data) {
-          setAutoApproveJobs(data.auto_approve_jobs ?? false)
-          setAutoApproveTelegram(data.auto_approve_telegram ?? false)
-        }
+        if (data) setAutoApproveTelegram(data.auto_approve_telegram ?? false)
       })
   }, [router])
 
@@ -71,28 +66,14 @@ export default function CreateJobPage() {
     setServerError('')
     if (!user || !jobId) return
 
-    // visible = true только если включена автомодерация на сайте
-    const visible = autoApproveJobs
-
-    // Конвертируем пустые строки в undefined — иначе БД нарушает CHECK constraint
-    const clean: Record<string, any> = { ...data }
-    const nullableFields = ['contract_type', 'sphere', 'format', 'job_type', 'experience_level', 'location', 'contact']
-    for (const f of nullableFields) {
-      if (clean[f] === '') clean[f] = undefined
-    }
-    if (!clean.salary_min)  clean.salary_min  = undefined
-    if (!clean.salary_max)  clean.salary_max  = undefined
-
     const { error } = await jobsService.createJob({
-      ...clean,
+      ...data,
       id: jobId,
       created_by: user.id,
-      visible,
+      visible: true,   // автомодерация — вакансии сразу публикуются
     })
     if (error) { setServerError((error as any).message || 'Ошибка'); return }
 
-    // Telegram: отправляем только если включена автомодерация для TG И вакансия уже видима
-    // (или если авто-TG включён отдельно даже без авто-апрува сайта)
     if (autoApproveTelegram) {
       try {
         await postJobToTelegram({
@@ -101,9 +82,7 @@ export default function CreateJobPage() {
           salary_min: data.salary_min as number | undefined,
           salary_max: data.salary_max as number | undefined,
         })
-      } catch (e) {
-        console.warn('Telegram post failed:', e)
-      }
+      } catch (e) { console.warn('Telegram post failed:', e) }
     }
 
     router.push('/dashboard/hr')
@@ -117,11 +96,9 @@ export default function CreateJobPage() {
 
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-[#0F172A] mb-1">Создать вакансию</h1>
-        {/* Статус-бейджи модерации */}
         <div className="flex flex-wrap gap-2 mt-3">
-          <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-medium border ${autoApproveJobs ? 'bg-green-50 text-green-700 border-green-100' : 'bg-amber-50 text-amber-700 border-amber-100'}`}>
-            <ShieldCheck size={11}/>
-            {autoApproveJobs ? 'Автопубликация включена' : 'Требует модерации администратора'}
+          <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-medium border bg-green-50 text-green-700 border-green-100">
+            <ShieldCheck size={11}/>Автопубликация включена
           </span>
           {autoApproveTelegram && (
             <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-medium border bg-blue-50 text-blue-700 border-blue-100">
@@ -155,15 +132,15 @@ export default function CreateJobPage() {
           </div>
           <FormInput label="Компания *" placeholder="Название компании" {...register('company')} error={errors.company?.message}/>
           <div className="grid grid-cols-2 gap-4">
-            <FormSelect label="Сфера *"        options={SPHERES}       {...register('sphere')}/>
-            <FormSelect label="Уровень"         options={LEVELS}        {...register('experience_level')}/>
+            <FormSelect label="Сфера *"        options={SPHERES}        {...register('sphere')}/>
+            <FormSelect label="Уровень"         options={LEVELS}         {...register('experience_level')}/>
           </div>
           <div className="grid grid-cols-2 gap-4">
-            <FormSelect label="Формат работы"   options={FORMATS}       {...register('format')}/>
-            <FormSelect label="Тип занятости"   options={JOB_TYPES}     {...register('job_type')}/>
+            <FormSelect label="Формат работы"  options={FORMATS}        {...register('format')}/>
+            <FormSelect label="Тип занятости"  options={JOB_TYPES}      {...register('job_type')}/>
           </div>
           <div className="grid grid-cols-2 gap-4">
-            <FormSelect label="Тип договора"    options={CONTRACT_TYPES} {...register('contract_type')}/>
+            <FormSelect label="Тип договора"   options={CONTRACT_TYPES} {...register('contract_type')}/>
             <FormInput  label="Город / Локация" placeholder="Москва / Удалённо" {...register('location')}/>
           </div>
         </div>
@@ -193,10 +170,26 @@ export default function CreateJobPage() {
         </div>
 
         {/* Контакты */}
-        <div className="bg-white rounded-[16px] border border-[#E5E7EB] p-5 shadow-sm space-y-3">
-          <h2 className="text-sm font-semibold text-[#0F172A]">Контакты для откликов</h2>
-          <FormInput label="Telegram / Email" placeholder="@username или hr@company.ru" {...register('contact')}/>
-          <p className="text-xs text-[#94A3B8]">В Telegram-посте вместо контактов публикуется ссылка на страницу вакансии на сайте.</p>
+        <div className="bg-white rounded-[16px] border border-[#E5E7EB] p-5 shadow-sm space-y-4">
+          <div>
+            <h2 className="text-sm font-semibold text-[#0F172A]">Контакты для откликов</h2>
+            <p className="text-xs text-[#94A3B8] mt-0.5">Видны кандидатам на странице вакансии</p>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-[#374151]">Telegram</label>
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-[#94A3B8]">@</span>
+                <input
+                  {...register('telegram')}
+                  placeholder="username"
+                  className="w-full h-10 pl-7 pr-3 rounded-[10px] border border-[#E5E7EB] text-sm placeholder:text-[#94A3B8] focus:outline-none focus:border-[#7C3AED] focus:ring-2 focus:ring-[#7C3AED]/10"
+                />
+              </div>
+            </div>
+            <FormInput label="Email" placeholder="hr@company.ru" {...register('email_contact')}/>
+          </div>
+          <p className="text-xs text-[#94A3B8]">В Telegram-посте публикуется ссылка на страницу вакансии на сайте.</p>
         </div>
 
         {/* Ссылка */}
@@ -226,9 +219,7 @@ export default function CreateJobPage() {
             ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"/>
             : autoApproveTelegram
               ? <><Send size={14}/>Опубликовать и отправить в Telegram</>
-              : autoApproveJobs
-                ? <><ShieldCheck size={14}/>Опубликовать вакансию</>
-                : 'Отправить на модерацию'}
+              : <><ShieldCheck size={14}/>Опубликовать вакансию</>}
         </button>
       </form>
     </div>

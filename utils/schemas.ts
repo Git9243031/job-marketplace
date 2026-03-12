@@ -25,7 +25,9 @@ export const jobSchema = z.object({
   salary_max:       z.coerce.number().optional(),
   skills:           z.array(z.string()).default([]),
   tags:             z.array(z.string()).default([]),
-  contact:          z.string().optional(),
+  contact:       z.string().optional(),
+  telegram:      z.string().optional(),
+  email_contact: z.string().email('Некорректный email').optional().or(z.literal('')),
 })
 
 export const resumeSchema = z.object({
