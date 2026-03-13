@@ -1,4 +1,5 @@
 "use client";
+
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -17,6 +18,7 @@ import {
   TrendingUp,
   CheckCircle,
   Layout,
+  UserCircle,
 } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
 import { jobsService } from "@/services/jobs";
@@ -68,8 +70,41 @@ export default function AdminDashboard() {
     auto_approve_telegram: false,
   });
   const [loading, setLoading] = useState(true);
-  const [exporting, setExporting] = useState<string | null>(null); // ← single declaration
+  const [exporting, setExporting] = useState<string | null>(null);
   const router = useRouter();
+
+  // Функция для загрузки данных
+  const loadData = async () => {
+    try {
+      const [j, r, us, s] = await Promise.all([
+        jobsService.getAllJobsAdmin(),
+        resumesService.getAllResumesAdmin(),
+        supabase.from("users").select("*").order("created_at"),
+        adminService.getSettings(),
+      ]);
+
+      console.log("US object:", us);
+      console.log("US data length:", us.data?.length);
+      console.log("US data:", us.data);
+      console.log("US error:", us.error);
+      console.log("US status:", us.status);
+
+      setJobs(j.data || []);
+      setResumes(r.data || []);
+      setUsers(us.data || []);
+
+      if (s.data) {
+        setSettings({
+          telegram_autopost_enabled: s.data.telegram_autopost_enabled,
+          header_enabled: s.data.header_enabled ?? true,
+          auto_approve_jobs: s.data.auto_approve_jobs ?? false,
+          auto_approve_telegram: s.data.auto_approve_telegram ?? false,
+        });
+      }
+    } catch (error) {
+      console.error("Error loading data:", error);
+    }
+  };
 
   useEffect(() => {
     supabase.auth.getUser().then(async ({ data }) => {
@@ -77,37 +112,24 @@ export default function AdminDashboard() {
         router.push("/auth/login");
         return;
       }
+
       const { data: u } = await supabase
         .from("users")
         .select("*")
         .eq("id", data.user.id)
         .single();
+
       if (!u || u.role !== "admin") {
         router.push("/");
         return;
       }
+
       setUser(u);
-      const [j, r, us, s] = await Promise.all([
-        jobsService.getAllJobsAdmin(),
-        resumesService.getAllResumesAdmin(),
-        supabase.from("users").select("*").order("created_at"),
-        adminService.getSettings(),
-      ]);
-      setJobs(j.data || []);
-      setResumes(r.data || []);
-      setUsers(us.data || []);
-      if (s.data)
-        setSettings({
-          telegram_autopost_enabled: s.data.telegram_autopost_enabled,
-          header_enabled: s.data.header_enabled ?? true,
-          auto_approve_jobs: s.data.auto_approve_jobs ?? false,
-          auto_approve_telegram: s.data.auto_approve_telegram ?? false,
-        });
+      await loadData();
       setLoading(false);
     });
   }, [router]);
 
-  // ← single definition; uses consistent filename pattern
   const exportJobs = async (fmt: "xlsx" | "docx") => {
     setExporting(fmt);
     try {
@@ -135,34 +157,40 @@ export default function AdminDashboard() {
       prev.map((j) => (j.id === id ? { ...j, visible: !cur } : j)),
     );
   };
+
   const toggleResumeVis = async (id: string, cur: boolean) => {
     await resumesService.toggleVisibility(id, !cur);
     setResumes((prev) =>
       prev.map((r) => (r.id === id ? { ...r, visible: !cur } : r)),
     );
   };
+
   const toggleHeader = async () => {
     const next = !settings.header_enabled;
     await adminService.updateHeaderEnabled(next);
     setSettings((s) => ({ ...s, header_enabled: next }));
   };
+
   const toggleAutoApproveJobs = async () => {
     const next = !settings.auto_approve_jobs;
     const { updateAutoApproveJobs } = await import("@/services/admin");
     await updateAutoApproveJobs(next);
     setSettings((s) => ({ ...s, auto_approve_jobs: next }));
   };
+
   const toggleAutoApproveTelegram = async () => {
     const next = !settings.auto_approve_telegram;
     const { updateAutoApproveTelegram } = await import("@/services/admin");
     await updateAutoApproveTelegram(next);
     setSettings((s) => ({ ...s, auto_approve_telegram: next }));
   };
+
   const deleteJob = async (id: string) => {
     if (!confirm("Удалить вакансию?")) return;
     await jobsService.deleteJob(id);
     setJobs((prev) => prev.filter((j) => j.id !== id));
   };
+
   const deleteResume = async (id: string) => {
     if (!confirm("Удалить резюме?")) return;
     await resumesService.deleteResume(id);
@@ -179,23 +207,14 @@ export default function AdminDashboard() {
     legal: "Юриспруденция",
     other: "Другое",
   };
-  const ROLE_RU: Record<string, string> = {
-    admin: "Администратор",
-    hr: "HR",
-    candidate: "Соискатель",
-  };
-  const ROLE_COLOR: Record<string, string> = {
-    admin: "bg-red-50 text-red-700",
-    hr: "bg-blue-50 text-blue-700",
-    candidate: "bg-green-50 text-green-700",
-  };
 
-  if (loading)
+  if (loading) {
     return (
       <div className="flex justify-center py-20">
         <div className="w-6 h-6 border-2 border-[#E5E7EB] border-t-[#7C3AED] rounded-full animate-spin" />
       </div>
     );
+  }
 
   const stats = {
     totalJobs: jobs.length,
@@ -206,6 +225,7 @@ export default function AdminDashboard() {
     totalUsers: users.length,
     hrUsers: users.filter((u) => u.role === "hr").length,
     candidates: users.filter((u) => u.role === "candidate").length,
+    admins: users.filter((u) => u.role === "admin").length,
     recentJobs: jobs.filter(
       (j) => new Date(j.created_at) > new Date(Date.now() - 7 * 86400000),
     ).length,
@@ -287,7 +307,7 @@ export default function AdminDashboard() {
         ))}
       </div>
 
-      {/* ── OVERVIEW ── */}
+      {/* Overview Tab */}
       {tab === "overview" && (
         <div className="space-y-6">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -316,11 +336,13 @@ export default function AdminDashboard() {
               icon={Users}
               label="Пользователей"
               value={stats.totalUsers}
-              sub={`${stats.hrUsers} HR, ${stats.candidates} кандидатов`}
+              sub={`${stats.hrUsers} HR, ${stats.candidates} кандидатов, ${stats.admins} админов`}
               color="bg-blue-500"
             />
           </div>
+
           <div className="grid md:grid-cols-2 gap-4">
+            {/* Pending jobs */}
             <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="font-semibold text-[#0F172A]">
@@ -361,6 +383,8 @@ export default function AdminDashboard() {
                 </p>
               )}
             </div>
+
+            {/* Recent jobs */}
             <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6">
               <h2 className="font-semibold text-[#0F172A] mb-4">
                 Последние вакансии
@@ -395,7 +419,7 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {/* ── JOBS ── */}
+      {/* Jobs Tab */}
       {tab === "jobs" && (
         <div className="space-y-3">
           <div className="flex items-center justify-between mb-2">
@@ -477,7 +501,7 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {/* ── RESUMES ── */}
+      {/* Resumes Tab */}
       {tab === "resumes" && (
         <div className="space-y-3">
           <div className="flex items-center justify-between mb-2">
@@ -549,67 +573,114 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {/* ── USERS ── */}
+      {/* Users Tab - WITH PROFILE LINKS */}
       {tab === "users" && (
         <div>
-          <div className="grid grid-cols-3 gap-4 mb-6">
-            {[
-              ["Всего", stats.totalUsers, "text-[#7C3AED]"],
-              ["HR / Рекрутёры", stats.hrUsers, "text-blue-600"],
-              ["Соискатели", stats.candidates, "text-green-600"],
-            ].map(([l, v, c]) => (
-              <div
-                key={String(l)}
-                className="bg-white rounded-[14px] border border-[#E5E7EB] p-5"
-              >
-                <p className={`text-2xl font-bold ${c}`}>{v}</p>
-                <p className="text-xs text-[#64748B] mt-1">{l}</p>
-              </div>
-            ))}
+          {/* Stats Cards */}
+          <div className="grid grid-cols-4 gap-4 mb-6">
+            <div className="bg-white rounded-[14px] border border-[#E5E7EB] p-5">
+              <p className="text-2xl font-bold text-[#7C3AED]">
+                {stats.totalUsers}
+              </p>
+              <p className="text-xs text-[#64748B] mt-1">Всего</p>
+            </div>
+            <div className="bg-white rounded-[14px] border border-[#E5E7EB] p-5">
+              <p className="text-2xl font-bold text-red-600">{stats.admins}</p>
+              <p className="text-xs text-[#64748B] mt-1">Администраторы</p>
+            </div>
+            <div className="bg-white rounded-[14px] border border-[#E5E7EB] p-5">
+              <p className="text-2xl font-bold text-blue-600">
+                {stats.hrUsers}
+              </p>
+              <p className="text-xs text-[#64748B] mt-1">HR / Рекрутёры</p>
+            </div>
+            <div className="bg-white rounded-[14px] border border-[#E5E7EB] p-5">
+              <p className="text-2xl font-bold text-green-600">
+                {stats.candidates}
+              </p>
+              <p className="text-xs text-[#64748B] mt-1">Соискатели</p>
+            </div>
           </div>
-          <div className="bg-white rounded-[20px] border border-[#E5E7EB] overflow-hidden shadow-sm">
-            <div className="px-6 py-4 border-b border-[#E5E7EB] flex items-center justify-between">
+
+          {/* Users List */}
+          <div className="bg-white rounded-[20px] border border-[#E5E7EB] overflow-hidden">
+            <div className="px-6 py-4 border-b border-[#E5E7EB]">
               <h2 className="font-semibold text-[#0F172A]">
                 Все пользователи ({users.length})
               </h2>
             </div>
-            <div className="divide-y divide-[#F1F5F9]">
-              {users.map((u) => (
-                <div
-                  key={u.id}
-                  className="px-6 py-3.5 flex items-center justify-between gap-4"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-[#EDE9FE] flex items-center justify-center text-[#7C3AED] text-xs font-bold">
-                      {u.email?.[0]?.toUpperCase()}
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium text-[#0F172A]">
-                        {u.email}
-                      </p>
-                      <p className="text-xs text-[#94A3B8]">
-                        {formatDate(u.created_at)}
-                      </p>
-                    </div>
-                  </div>
-                  <span
-                    className={cn(
-                      "text-xs font-semibold px-2.5 py-1 rounded-full",
-                      ROLE_COLOR[u.role] || "bg-gray-50 text-gray-700",
-                    )}
+
+            {users.length === 0 ? (
+              <div className="p-8 text-center text-[#94A3B8]">
+                Нет пользователей для отображения
+              </div>
+            ) : (
+              <div className="divide-y divide-[#F1F5F9]">
+                {users.map((userItem) => (
+                  <Link
+                    key={userItem.id}
+                    href={`/dashboard/admin/users/${userItem.id}`}
+                    className="px-6 py-4 flex items-center justify-between hover:bg-[#F8FAFC] transition-colors group cursor-pointer"
                   >
-                    {ROLE_RU[u.role] || u.role}
-                  </span>
-                </div>
-              ))}
-            </div>
+                    <div className="flex items-center gap-3 flex-1">
+                      <div className="w-8 h-8 rounded-full bg-[#EDE9FE] flex items-center justify-center text-[#7C3AED] text-xs font-bold group-hover:bg-[#7C3AED] group-hover:text-white transition-colors">
+                        {userItem.email?.[0]?.toUpperCase() || "?"}
+                      </div>
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-[#0F172A] group-hover:text-[#7C3AED] transition-colors">
+                            {userItem.email}
+                          </p>
+                          <UserCircle
+                            size={14}
+                            className="text-[#94A3B8] group-hover:text-[#7C3AED] opacity-0 group-hover:opacity-100 transition-opacity"
+                          />
+                        </div>
+                        <p className="text-xs text-[#94A3B8]">
+                          {formatDate(userItem.created_at)}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={cn(
+                          "text-xs font-semibold px-2.5 py-1 rounded-full",
+                          userItem.role === "admin"
+                            ? "bg-red-50 text-red-700 group-hover:bg-red-100"
+                            : userItem.role === "hr"
+                              ? "bg-blue-50 text-blue-700 group-hover:bg-blue-100"
+                              : "bg-green-50 text-green-700 group-hover:bg-green-100",
+                        )}
+                      >
+                        {userItem.role === "admin"
+                          ? "Администратор"
+                          : userItem.role === "hr"
+                            ? "HR"
+                            : "Соискатель"}
+                      </span>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Hidden debug info - remove after fixing */}
+          <div className="mt-4 p-2 bg-gray-100 rounded text-xs font-mono text-gray-600 opacity-50 hover:opacity-100 transition-opacity">
+            <details>
+              <summary>Debug: users.length = {users.length}</summary>
+              <pre className="mt-2 p-2 bg-white rounded overflow-auto max-h-40">
+                {JSON.stringify(users, null, 2)}
+              </pre>
+            </details>
           </div>
         </div>
       )}
 
-      {/* ── SETTINGS ── */}
+      {/* Settings Tab */}
       {tab === "settings" && (
         <div className="max-w-2xl space-y-4">
+          {/* Header Toggle */}
           <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 shadow-sm">
             <div className="flex items-center justify-between">
               <div>
@@ -648,6 +719,7 @@ export default function AdminDashboard() {
             </div>
           </div>
 
+          {/* Auto Approve Jobs */}
           <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 shadow-sm">
             <div className="flex items-center justify-between">
               <div>
@@ -686,6 +758,7 @@ export default function AdminDashboard() {
             </div>
           </div>
 
+          {/* Auto Approve Telegram */}
           <div className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 shadow-sm">
             <div className="flex items-center justify-between">
               <div>
@@ -724,6 +797,7 @@ export default function AdminDashboard() {
             </div>
           </div>
 
+          {/* Info */}
           <div className="bg-[#EDE9FE] rounded-[16px] p-5 text-sm text-[#7C3AED]">
             <p className="font-semibold mb-2">
               Telegram настройки (.env.local / Vercel)
